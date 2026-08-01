@@ -6,9 +6,32 @@ This covers material your email indicated would come up in the final conversatio
 
 ---
 
+## Assumptions
+
+§0 of the main response lists the assumptions that apply to both documents; those still hold here. These are additional, and the first one is the largest — Section A is built on a scenario I invented, because your brief describes no constraints at all.
+
+| Area | Assumption | Note |
+|---|---|---|
+| A | "Tight timeline, no infrastructure budget, small team" is hypothetical | Your brief states none of these. It's written to answer the pivot-under-constraints question your email flagged for the final conversation. Give me the real constraints and this table changes |
+| A | ~15 s p95 is a tolerable synchronous wait behind a loading state | A chosen target, not a measured one |
+| A | Deterministic checks are ~15% of the validation work | An estimate from comparable pipelines; not measured here |
+| A | An LLM vendor with native multimodal document support is contractually available | Otherwise the OCR stage can't be skipped and that row of the table doesn't work |
+| B | Canadian jurisdiction, with IRCC the likely PoV counterparty | Inferred solely from the IRPR reference in your screenshot. A provincial or non-Canadian counterparty changes the whole residency analysis |
+| B | Protected B is the plausible classification ceiling | Stated nowhere; if it's higher, self-hosting stops being optional |
+| B | Cloud hosting rather than on-premises | On-prem removes the residency question and substitutes an operations burden |
+| B | The privilege discussion is engineering-informed, not legal advice | Needs counsel and law-society confirmation before it drives contract terms |
+| C | Multi-tenant, with user accounts (`org_id`, `created_by`) | Not stated; single-tenant would simplify the model |
+| C | Five tables is a sketch, not a complete model | Omits auth, the form registry, field mapping, and billing |
+| D | SSR or SSG is in use | Hydration handling is unnecessary in a pure client-rendered SPA |
+| D | Autosave payloads stay under 64 KB | `fetch` with `keepalive` is capped there. A 5,000-word draft is roughly 30 KB so it fits, but a larger field would fail silently — worth a guard |
+| E | Python 3.12+, Pydantic v2, rapidfuzz; fuzzy threshold 90 | Dependency and tuning choices |
+| E | `check_restoration` is illustrative | Claim construction is elided (`claims=[...]`) |
+
+---
+
 ## A. Resource-Constrained Pivot Strategy
 
-The architecture in the main response is the target state. Dropped into this as immediate rescue work — tight timeline, no infrastructure budget yet, small team — I wouldn't build all of it before shipping a fix. Each corner below is cut deliberately, and each sits behind an interface (`fileId`, `CaseFieldsV1`, the file `status` enum) that doesn't change when the corner is later un-cut.
+The architecture in the main response is the target state. Assume for this section the constraints named above — tight timeline, no infrastructure budget yet, small team — since dropped into that, I wouldn't build all of it before shipping a fix. Each corner below is cut deliberately, and each sits behind an interface (`fileId`, `CaseFieldsV1`, the file `status` enum) that doesn't change when the corner is later un-cut.
 
 | Constraint | Cut | What it costs | Why the interface holds |
 |---|---|---|---|

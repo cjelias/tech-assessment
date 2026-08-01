@@ -9,6 +9,30 @@ To close the two questions your note left open: my work at FoodLogiQ, Smile CDR,
 
 ---
 
+## 0. Assumptions
+
+This is written without access to the repository, a running environment, logs, or the team. Everything below is inferred from the brief, the defect report, and the screenshot on page 2 — so I've listed what I assumed and what changes if I'm wrong, rather than letting those choices sit implicit in the design.
+
+| Area | Assumption | If it's wrong |
+|---|---|---|
+| Diagnosis | §1 names *candidate* causes, not confirmed ones — no repo, environment, or logs | §1.3 reorders which fix ships first, not the architecture |
+| Diagnosis | The page-2 screenshot is current production UI | The `accept`-filter finding drops; failure points 5–7 stand alone |
+| Stack | Next.js 13+ / React 18+, either router | Store placement changes file; "above the router" holds |
+| Stack | Postgres; Python 3.12+ with Pydantic v2 | Appendix C's DDL and the `Extracted[T]` syntax change; the model doesn't |
+| Stack | Object storage, job queue, and vector index available or fundable | Appendix A is the plan for when they aren't |
+| Stack | Hosted LLM API with function calling, no access to weights | Cross-attention (§4.4) becomes viable with owned weights |
+| Stack | More than one backend replica, or serverless | Failure #8 disappears on a single long-lived process |
+| Domain | Canadian immigration practice; IRPR s.182 live for these users | `CaseFieldsV1` and the s.182 rule swap out; the provenance pattern doesn't |
+| Domain | Application Forms has an enumerable field schema to map into | §3's mapping needs a form registry before §4 is useful |
+| Domain | Statutory rules in code get counsel sign-off and an effective date | A process requirement, not a code one — encoding a misread rule is worse than encoding none |
+| Domain | Case data is PII and may be privileged | Appendix B's residency and privilege posture relaxes considerably |
+| Product | Upload-on-selection is acceptable; drafts exist before submit | Falls back to upload-on-submit; files can't pre-process |
+| Product | A human reviewer clears blocking flags | Blocking pre-fill becomes a queue nobody drains |
+| Product | Typed case text stays out of browser storage as PII | Drop `partialize` and the draft survives refresh too |
+| Numbers | 6,700 tokens per 5,000 words, 0.9 fuzzy threshold, 800 ms debounce, 15 s p95 | Starting points for tuning, not derived from your data |
+
+---
+
 ## 1. Root Cause Analysis
 
 ### 1.1 Why the frontend forgets text and files on navigation
