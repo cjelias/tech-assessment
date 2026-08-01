@@ -20,6 +20,7 @@ This covers material your email indicated would come up in the final conversatio
 | B | Protected B is the plausible classification ceiling | Stated nowhere; if it's higher, self-hosting stops being optional |
 | B | Cloud hosting rather than on-premises | On-prem removes the residency question and substitutes an operations burden |
 | B | The privilege discussion is engineering-informed, not legal advice | Needs counsel and law-society confirmation before it drives contract terms |
+| B | A form is eventually exported or filed from the pre-filled draft | The §3 pipeline stops at pre-fill; the `relied_upon` event assumes a discrete downstream step. If there isn't one, that event becomes "user accepted the draft" and the argument is unchanged |
 | C | Multi-tenant, with user accounts (`org_id`, `created_by`) | Not stated; single-tenant would simplify the model |
 | C | Five tables is a sketch, not a complete model | Omits auth, the form registry, field mapping, and billing |
 | D | Next.js 16.1 App Router with server rendering | Hydration handling is unnecessary in a pure client-rendered SPA |
@@ -52,7 +53,26 @@ The underlying discipline is what made the ingestion rescues at FoodLogiQ and Sm
 
 Provenance isn't an addition to this design — §4.2 attaches source, page, and verified quote to every extracted value for correctness reasons that have nothing to do with compliance. For a government Proof of Value, the same objects become the audit record with modest additions.
 
-**Append-only, not latest-value-only.** Persist every extraction, every judge verdict, and every human resolution to an immutable `extraction_events` log keyed by `caseId` (schema in §C). "What did the system claim, from which source, when, and who overrode it" has to be answerable months later, not only at request time.
+**Append-only, not latest-value-only.** An audit log is the easiest thing in a design like this to mistake for compliance scope creep, so it's worth naming what actually generates it. Three mechanisms already in the main response produce *different values for the same field over time*: §3 retries extraction after a validation failure, a second upload re-runs it against a larger corpus, and Section A above stages the extraction stack itself changing beneath live cases. The form a lawyer files is fixed at a moment; the extraction behind it isn't. Store only the current value and *"the form said 12 March when we filed and says 4 April now — which one was wrong?"* has no answer.
+
+It is also the instrumentation whose absence let Defect 2 reach a user bug report. Nothing recorded what the model was actually given, so "the AI ignores my documents" stayed an anecdote rather than a diagnosable claim. §1.3 proposes logging the assembled prompt server-side during triage; this is the durable, per-case form of the same thing.
+
+*What writes an event.* The `event_type` values in §C, in the order a case hits them:
+
+| Event | Trigger | Payload carries |
+|---|---|---|
+| `uploaded` | File accepted or rejected at validation | MIME type, size, rejection reason |
+| `extracted` | Extraction completes, per file per `model_id` | Assembled prompt and raw response |
+| `judged` | A semantic or judge-based check returns (§4.4) | Verdict and stated rationale |
+| `flagged` | The gate raises a discrepancy (§4.1) | The N competing claims, with provenance |
+| `resolved` | A human overrides a blocking flag (§4.6) | Resolver identity, chosen value |
+| `relied_upon` | The form is exported or filed | Snapshot of every field as presented |
+
+The last row matters most and is the one usually missed. The other events describe what the system believed; `relied_upon` is the only record of what a person acted on, and it's where an audit starts.
+
+*Why not update in place.* `discrepancy_flags.resolved_by` holds the latest resolution only. A flag can be raised, resolved, re-raised when a later document arrives, then resolved differently — an `UPDATE` erases the first decision, which is precisely the one that gets asked about. Same argument for `extractions.is_current`: it preserves superseded values but not the prompt, model, and evidence that produced them.
+
+*What it costs.* Prompt/response payloads dominate the volume — that's what `compression.zstd` in §F is for — and it forces an explicit retention policy instead of an implicit keep-forever. Strip away the Proof of Value framing and the cheaper version is structured application logs at short retention: the debugging value survives, long-horizon per-case reconstruction doesn't. It partly pays for itself either way, since the `extracted` events are the labelled corpus the §4.4 regression harness needs.
 
 **No opaque decisions.** Because extraction and validation are already schema-constrained with retry-on-malformed-output, raw prompt/response pairs are cheap to log and reviewable by a person without re-running the model. Combined with verified citations, every flag a reviewer sees can be traced to text in a specific file on a specific page.
 
@@ -113,7 +133,7 @@ CREATE TABLE extraction_events (
   event_id       BIGSERIAL PRIMARY KEY,
   case_id        UUID NOT NULL REFERENCES cases,
   file_id        UUID REFERENCES case_files,
-  event_type     TEXT NOT NULL,                 -- uploaded | extracted | judged | flagged | resolved
+  event_type     TEXT NOT NULL,                 -- uploaded | extracted | judged | flagged | resolved | relied_upon
   actor          TEXT NOT NULL,                 -- 'system:<model_id>' or 'user:<uuid>'
   payload        JSONB NOT NULL,                -- prompt/response pair, or the resolution
   occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -134,7 +154,7 @@ CREATE TABLE discrepancy_flags (
 CREATE INDEX ON discrepancy_flags (case_id) WHERE resolved_at IS NULL;
 ```
 
-Three choices worth calling out. `schema_version` on `extractions` means a schema change doesn't invalidate historical records — necessary when an audit reads a case extracted under last year's schema. The partial unique index enforces exactly one current extraction per case while keeping superseded ones. And `discrepancy_flags.resolved_by` records *who* overrode a blocking flag, which is the question an auditor asks first.
+Three choices worth calling out. `schema_version` on `extractions` means a schema change doesn't invalidate historical records — necessary when an audit reads a case extracted under last year's schema. The partial unique index enforces exactly one current extraction per case while keeping superseded ones. And `discrepancy_flags.resolved_by` records *who* overrode a blocking flag, which is the question an auditor asks first — but only for the most recent resolution, which is why the `resolved` events in `extraction_events` carry the sequence when a flag is raised more than once.
 
 ---
 

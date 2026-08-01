@@ -349,7 +349,7 @@ Its documented behaviour is also its trap. **Token-set ratio returns 100 when on
 
 ### 4.6 Surfacing discrepancies
 
-Flags render inline beside the affected field, showing each conflicting value with its source ("prompt" versus "contract.pdf p.3") and a one-line explanation. Blocking severities leave the field **empty** with a warning rather than silently picking a winner, and require an explicit decision recorded against the resolver's identity. Non-blocking flags pre-fill but stay visually marked. The principle throughout: the system never resolves a legal ambiguity on the user's behalf, and never hides that one existed.
+Flags render inline beside the affected field, showing each conflicting value with its source ("prompt" versus "contract.pdf p.3") and a one-line explanation. Blocking severities leave the field **empty** with a warning rather than silently picking a winner, and require an explicit decision recorded against the resolver's identity — appended rather than overwriting the previous one, since a resolved flag can be re-raised when a later document arrives (appendix §B). Non-blocking flags pre-fill but stay visually marked. The principle throughout: the system never resolves a legal ambiguity on the user's behalf, and never hides that one existed.
 
 ---
 
