@@ -298,7 +298,7 @@ Modelling a flag as a list of claims rather than a `prompt_value`/`document_valu
 
 ### 4.4 Methods, by category
 
-- **Deterministic first, because it's cheap and certain.** Pydantic/JSON Schema validation for required-field presence and type conformance; normalizing dates to ISO-8601 before comparison so "45 days ago" resolves against an explicit date in the PDF; fuzzy matching (Levenshtein / token-set ratio) for names and case numbers where OCR noise is expected; and codified statutory rules like the one above. Anything answerable this way should never reach a model.
+- **Deterministic first, because it's cheap and certain.** Pydantic/JSON Schema validation for required-field presence and type conformance; normalizing dates to ISO-8601 before comparison so "45 days ago" resolves against an explicit date in the PDF; codified statutory rules like the s.182 check above; and approximate string matching for names and identifiers, where the choice of metric matters enough that §4.5 covers it separately. Anything answerable this way should never reach a model.
 - **Semantic comparison for narrative fields.** Embedding cosine similarity as a cheap first pass to find which statements are *about* the same thing, then a **Natural Language Inference** classifier over those pairs for entailment / contradiction / neutral. The ordering matters: similarity tells you two statements are topically related, never that they disagree. NLI is built for contradiction specifically.
 - **A grounded LLM judge, verified.** A verifier prompt separate from the extraction call — so the same failure mode isn't grading its own work — receives both structured objects plus source spans and returns schema-validated flags. Requiring a citation is necessary but *not sufficient*: a required string field catches a missing citation, not a fabricated one, and a model can invent a plausible quote that validates cleanly. So each cited span is checked against the real source before the flag is accepted:
 
@@ -312,11 +312,42 @@ def citations_must_exist(self, info):
     return self
 ```
 
-  A flag that can't be traced to real text fails validation and never reaches the UI. Malformed responses trigger a bounded retry (Instructor, or `model_validate` with a retry wrapper) rather than corrupting the report.
+  A flag that can't be traced to real text fails validation and never reaches the UI. Malformed responses trigger a bounded retry (Instructor, or `model_validate` with a retry wrapper) rather than corrupting the report. `partial_ratio` is deliberate here rather than the Levenshtein call in §4.5: this task is locating a span inside a long document, so substring alignment is the property that matters and the drift is transcription-level, not the character substitution you get on a short fixed-format identifier.
 - **RAG evaluation as a regression harness.** Because §3 retrieves document spans rather than concatenating them, retrieval quality becomes a correctness risk — a missed chunk looks identical to a missing field. I'd keep a labelled fixture set of case packets and score every pipeline change offline with RAGAS or DeepEval on **context recall** (did retrieval surface the span containing the answer) and **faithfulness** (is each extracted value grounded in retrieved context). That turns "the AI got worse after we changed the chunker" from a support ticket into a failing build — the difference between a demo and something defensible in a government review.
 - **On cross-attention specifically.** Inspecting attention weights is a model-internals interpretability technique — real, but available only when you control the weights, as with a fine-tuned encoder over prompt/document pairs. It isn't exposed by a hosted API, and attention maps are weak evidence of causal attribution even when you have them. The production equivalent is the grounded judge above: functionally "attend across both sources," done through prompting, and unlike an attention map it yields a citation a human can check.
 
-### 4.5 Surfacing discrepancies
+### 4.5 Choosing a string-similarity metric
+
+Edit distance and token-set ratio are often named in the same breath, but they measure different things and are not substitutes. Comparing a permit number and comparing a client's name are different problems; using one metric for both yields false mismatches in one direction and false matches in the other.
+
+**Edit distance, for fixed-format identifiers.** Case numbers, UCI numbers, permit numbers and file numbers have fixed structure and no meaningful word order, and the errors that actually occur are OCR character confusions — `0`/`O`, `1`/`l`/`I`, `5`/`S`, `rn`/`m`. Those are **substitutions**, which is exactly what Levenshtein distance counts.
+
+One detail bites in practice: `rapidfuzz.fuzz.ratio` is *not* Levenshtein. It computes normalized **Indel** similarity, which permits only insertions and deletions, so every substitution costs 2 (a delete plus an insert) instead of 1. Used on identifiers it systematically over-penalizes the precise error class you expect from OCR. Call `rapidfuzz.distance.Levenshtein` explicitly rather than reaching for `fuzz.ratio` out of habit.
+
+Thresholds need the same care. On short identifiers a percentage is misleading — one wrong character in a ten-character permit number still scores 90%, but it is a different permit. Compare absolute distance, and treat a near-match as a question rather than an answer:
+
+```python
+from rapidfuzz.distance import Levenshtein
+
+def compare_identifier(a: str, b: str) -> Severity | None:
+    a, b = normalize_ocr(a), normalize_ocr(b)   # case, separators, confusion classes
+    d = Levenshtein.distance(a, b)
+    if d == 0:
+        return None                # same identifier
+    if d <= 2:
+        return "low_confidence"    # OCR noise, or a genuinely different number — ask
+    return "contradiction"         # different identifier
+```
+
+**Token-set ratio, for person and organization names.** Names reorder ("Smith, John" against "John Smith"), gain and lose middle names and initials, and carry honorifics and corporate suffixes. Edit distance reads reordering as near-total dissimilarity and produces false mismatches, so the token set is the right primitive: `token_set_ratio` compares the intersection and the remainders, which makes word order irrelevant.
+
+Its documented behaviour is also its trap. **Token-set ratio returns 100 when one string is a subset of the other, regardless of the extra tokens** — `token_set_ratio("John Smith Jr", "John Smith")` is a perfect match. In a legal filing "Jr" is not noise; it may be a different person, and two family members on one matter is not a rare scenario. So token-set is a candidate finder, not a verdict: take the match, then diff the residual tokens and treat a non-empty residue as a flag rather than discarding it. `token_sort_ratio` sits between the two — order-insensitive, but it does penalize extra tokens, which makes it the safer default wherever you don't positively expect subset relationships.
+
+**Normalize before either.** An OCR-aware normalization pass — case folding, stripping separators and diacritics, mapping known confusion classes — is worth more than the choice of metric, because it removes the noise rather than tolerating it.
+
+**And neither asserts equality.** A fuzzy match in this system produces a `low_confidence` or `contradiction` flag for a person to resolve (§4.3). It never silently merges two values: the cost of wrongly merging two clients' identifiers is nowhere near symmetric with the cost of asking.
+
+### 4.6 Surfacing discrepancies
 
 Flags render inline beside the affected field, showing each conflicting value with its source ("prompt" versus "contract.pdf p.3") and a one-line explanation. Blocking severities leave the field **empty** with a warning rather than silently picking a winner, and require an explicit decision recorded against the resolver's identity. Non-blocking flags pre-fill but stay visually marked. The principle throughout: the system never resolves a legal ambiguity on the user's behalf, and never hides that one existed.
 
