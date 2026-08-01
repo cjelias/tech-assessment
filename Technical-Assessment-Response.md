@@ -51,20 +51,33 @@ sequenceDiagram
 Because there are four independent layers involved, "blindness" can originate at any of them — and in practice it is usually more than one:
 
 ```mermaid
-flowchart TD
-    A[Frontend: file input + textarea] -->|1| B[Request payload construction]
-    B -->|2| C[API endpoint / backend router]
-    C -->|3| D[Backend parser: PDF text extraction / OCR]
-    D -->|4| E[Prompt assembly]
-    E -->|5| F[LLM call]
-    F --> G[Structured extraction result]
+flowchart TB
+    subgraph R1[" "]
+        direction LR
+        A["Frontend: file input\n+ textarea"] -.->|Failure point 1| A1["File onChange captured in state,\nbut never appended to the outgoing request\n(only text field is sent)"]
+    end
+    subgraph R2[" "]
+        direction LR
+        B["Request payload\nconstruction"] -.->|Failure point 2| B1["Body sent as application/json\ninstead of multipart/form-data —\nbinary files silently dropped or\nnever reach the server"]
+    end
+    subgraph R3[" "]
+        direction LR
+        C["API endpoint /\nbackend router"] -.->|Failure point 3| C1["Endpoint reads req.body.prompt only;\nno multer/formidable/busboy middleware\nconfigured to parse the files array"]
+    end
+    subgraph R4[" "]
+        direction LR
+        D["Backend parser: PDF\ntext extraction / OCR"] -.->|Failure point 4| D1["PDF text layer extracted but\nscanned/image-based pages skipped\n(no OCR fallback); PNG never\nrouted through OCR or a vision model"]
+    end
+    subgraph R5[" "]
+        direction LR
+        E["Prompt assembly"] -.->|Failure point 5| E1["Extraction result computed but\nnever interpolated into the final\nLLM prompt string — classic\n'computed but not used' bug"]
+    end
+    subgraph R6[" "]
+        direction LR
+        F["LLM call"] -.->|Failure point 6| F1["Text-only model selected for a\nmultimodal input, or extracted\ntext exceeds context window\nand gets silently truncated"]
+    end
 
-    A -.->|Failure point 1| A1["File onChange captured in state,\nbut never appended to the outgoing request\n(only text field is sent)"]
-    B -.->|Failure point 2| B1["Body sent as application/json\ninstead of multipart/form-data —\nbinary files silently dropped or\nnever reach the server"]
-    C -.->|Failure point 3| C1["Endpoint reads req.body.prompt only;\nno multer/formidable/busboy middleware\nconfigured to parse the files array"]
-    D -.->|Failure point 4| D1["PDF text layer extracted but\nscanned/image-based pages skipped\n(no OCR fallback); PNG never\nrouted through OCR or a vision model"]
-    E -.->|Failure point 5| E1["Extraction result computed but\nnever interpolated into the final\nLLM prompt string — classic\n'computed but not used' bug"]
-    F -.->|Failure point 6| F1["Text-only model selected for a\nmultimodal input, or extracted\ntext exceeds context window\nand gets silently truncated"]
+    A --> B --> C --> D --> E --> F --> G["Structured extraction result"]
 
     style A1 fill:#fbeaea,stroke:#c0392b,color:#111
     style B1 fill:#fbeaea,stroke:#c0392b,color:#111
