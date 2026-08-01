@@ -4,6 +4,16 @@
 
 ---
 
+### A note on hands-on coding, and how this response was built
+
+Across FoodLogiQ, Smile CDR, and O'Reilly, my day-to-day has been hands-on: writing and reviewing production code in the same systems I was architecting — ingestion pipelines, normalization layers, and the provenance/audit logic that had to hold up under compliance review, not just design review. Architecture decisions on those platforms weren't made from a whiteboard; they came out of shipping something and then fixing what broke in it. That's the lens this response is written from, which is why it leans on concrete code and schemas below (§2.1, §4.1) rather than diagrams alone.
+
+In the interest of transparency, and per your own encouragement to use modern AI tooling: I used Claude Code to accelerate drafting and diagramming this response. The root-cause diagnosis, the architecture and trade-off calls, and the framing of what actually breaks in this scenario are mine, drawn from doing this kind of document-ingestion rescue work before — the tool moved faster, it didn't do the thinking.
+
+Given that this role anchors upcoming government Proof of Value work, I've added a short section on the provenance/audit posture this design treats as non-negotiable (§6), and a section on how I'd pivot the architecture if infrastructure or timeline were suddenly constrained (§5), since I expect that kind of pivot to come up directly in our next conversation.
+
+---
+
 ## 1. Root Cause Analysis (RCA)
 
 ### 1.1 Why the frontend "forgets" text and files on navigation
@@ -86,6 +96,55 @@ The fix is to stop treating `CaseDescription`'s form state as local, and instead
 - **Raw Browser Storage (`localStorage`/`sessionStorage`) alone**, without a store, works for small string fields but has no reactivity model, a ~5–10MB quota (too small for attached PDFs), and no structured update API — you'd end up hand-rolling what Zustand's persist middleware already does.
 
 The key architectural move is **placing the store provider above the router boundary** (e.g., in `_app.tsx` / the root layout) so the store instance itself is never unmounted when the route changes — only the page components that *read* from it are.
+
+```typescript
+// stores/useCaseDraftStore.ts — module-level singleton, instantiated once above the router
+import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+
+interface UploadedFileRef {
+  fileId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  status: 'uploading' | 'uploaded' | 'extracting' | 'ready' | 'failed';
+}
+
+interface CaseDraftState {
+  caseId: string | null;
+  promptText: string;
+  analysisRole: 'legal_analyst' | 'counsel_applicant' | 'counsel_respondent' | 'adjudicator';
+  files: UploadedFileRef[];
+  setPromptText: (text: string) => void;
+  addFile: (file: UploadedFileRef) => void;
+  updateFileStatus: (fileId: string, status: UploadedFileRef['status']) => void;
+}
+
+export const useCaseDraftStore = create<CaseDraftState>()(
+  persist(
+    (set) => ({
+      caseId: null,
+      promptText: '',
+      analysisRole: 'legal_analyst',
+      files: [],
+      setPromptText: (text) => set({ promptText: text }),
+      addFile: (file) => set((s) => ({ files: [...s.files, file] })),
+      updateFileStatus: (fileId, status) =>
+        set((s) => ({
+          files: s.files.map((f) => (f.fileId === fileId ? { ...f, status } : f)),
+        })),
+    }),
+    {
+      name: 'lextar-case-draft',
+      storage: createJSONStorage(() => sessionStorage),
+      // File objects never enter this store to begin with (see §2.2) — only
+      // JSON-safe refs — so a plain persist() is enough; no custom serializer needed.
+    }
+  )
+);
+```
+
+Both `CaseDescription` and `ApplicationForms` import the same `useCaseDraftStore` hook and select only the slices they need (e.g., `useCaseDraftStore((s) => s.promptText)`), so a keystroke on one page doesn't re-render the other page even though they share state.
 
 ```mermaid
 flowchart TB
@@ -182,6 +241,31 @@ Treat both inputs as **structured, comparable objects** rather than raw text, th
 2. Run the document extraction through the identical schema.
 3. Now both sides are typed, field-aligned objects — comparable **without** re-parsing free text every time.
 
+```python
+# schemas/case_fields.py — the one schema both extraction paths target
+from pydantic import BaseModel, Field
+from datetime import date
+from typing import Literal
+
+class CaseFieldsV1(BaseModel):
+    client_name: str | None = None
+    jurisdiction: str | None = None
+    filing_date: date | None = None
+    permit_expiry_date: date | None = None
+    case_type: Literal["restoration_of_status", "extension", "appeal", "other"] | None = None
+    confidence: float = Field(ge=0, le=1, default=1.0)
+    source_span: str | None = None  # verbatim quote / page ref this field came from
+
+class DiscrepancyFlag(BaseModel):
+    field: str
+    prompt_value: str | None
+    document_value: str | None
+    severity: Literal["contradiction", "missing_field", "low_confidence"]
+    source_citation: str  # required, not optional — forces the judge model to ground every flag
+```
+
+`source_citation` being non-optional on `DiscrepancyFlag` is the load-bearing detail: Pydantic rejects any judge-model response that flags a conflict without pointing to where it came from, so an ungrounded hallucination fails validation instead of reaching the UI.
+
 ```mermaid
 flowchart TD
     A["User's typed prompt"] --> B["LLM extraction\n(schema: CaseFieldsV1)"]
@@ -210,3 +294,29 @@ flowchart TD
 ### 4.3 UX for flagged discrepancies
 
 Severity-tiered flags (`contradiction` / `missing_field` / `low_confidence`) rendered inline next to the relevant Application Forms field, each showing both conflicting values and their source (prompt vs. `contract.pdf p.3`). Hard contradictions block auto-fill of that specific field (leave it blank with a warning rather than silently picking one source) and require explicit user resolution; missing-field flags simply prompt the user to fill the gap manually.
+
+---
+
+## 5. Resource-Constrained Pivot Strategy
+
+The architecture above is the target state. If I were dropped into this as immediate rescue work — tight timeline, no dedicated infra budget yet, small team — I wouldn't build all of it before shipping a fix. Each corner below is cut deliberately, and each is isolated behind an interface (`fileId`, the `CaseFieldsV1` schema, the file `status` enum) that doesn't change when the corner gets un-cut later:
+
+- **No Redis/BullMQ available yet:** run extraction synchronously inside the upload request handler behind a loading state, and cap accepted file size/page count to keep p95 latency tolerable (e.g., under ~15s). The frontend still polls a `fileId` for status — swapping in an actual queue later is a backend-only change.
+- **No OCR/vision infra stood up:** send the PDF/PNG directly to the LLM vendor's native multimodal document support instead of standing up Tesseract + a routing layer. Costs more per call, but removes an entire pipeline stage — the right trade when the priority is "fix Defect 2 this week," not "run this cheaply at scale."
+- **No object storage provisioned:** store file bytes as a `bytea`/BLOB column in whatever Postgres instance already exists (with a hard size cap), keyed by the same `fileId`. Migrating to S3/GCS later doesn't touch the frontend or the schema, only the storage adapter.
+- **No time for full autosave + cross-device sync:** ship the `sessionStorage`-backed Zustand store alone first — it directly fixes the reported symptom (Defect 1, state lost on back-navigation) — and land the server-side autosave endpoint as a fast-follow rather than blocking the fix on it.
+
+The underlying discipline is the same one that made stabilizing FoodLogiQ and Smile CDR's ingestion pipelines survivable under similar pressure: cut the corner that's cheapest to undo, never the interface. A rushed synchronous extraction call and a fully queued one look identical to the frontend; a rushed schema change never does.
+
+---
+
+## 6. Provenance, Audit, and Government Proof-of-Value Considerations
+
+Deterministic provenance isn't a feature to add later for this design — it's already the backbone, because §4's `DiscrepancyFlag.source_citation` and per-field confidence score (§4.1) exist for reasons unrelated to compliance. For a government PoV, the same objects double as an audit record with a few additions:
+
+- **Append-only, not latest-value-only.** Persist every extraction and every judge-model verdict to an immutable `extraction_events` log keyed by `caseId`, not just the current structured result. "What did the system claim, from which source, and when" needs to be answerable months later, not just at request time.
+- **No opaque model decisions.** Because extraction and cross-reference validation are already schema-constrained (§3.1, §4.2) with retry-on-malformed-output, the raw prompt/response pairs are cheap to log and reviewable by a person without re-running the model.
+- **Data residency, flagged early, not discovered late.** A public multimodal LLM API is not a safe default for government case data containing PII. This needs an explicit decision — a VPC-scoped/GovCommercial-eligible model endpoint, or a self-hosted model for the extraction step — confirmed before it becomes a PoV blocker, not after the architecture is built around the wrong assumption.
+- **Retention tied to the existing lifecycle, not bolted on.** The status state machine in §3.2 already has a natural retention hook: `Ready` is the point extraction is trusted and retained; failed/abandoned uploads can be purged on a much shorter clock. Least-privilege access is scoped per `fileId`, matching the same reference object used everywhere else in the design.
+
+None of this requires new infrastructure beyond what §2–§4 already propose — it's the same objects, logged instead of discarded, and the same status model, given a retention policy instead of just a UI meaning.
