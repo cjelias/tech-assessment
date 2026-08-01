@@ -195,7 +195,7 @@ Four decisions carry this. **Extraction is asynchronous** — OCR and LLM calls 
 
 ### 4.1 A gate, not a report
 
-Validating that the Case Description text lines up with the uploaded files is a **blocking step before pre-fill**, not a report produced alongside it. Both inputs run through the *same* schema so they become typed, field-aligned objects, then get compared programmatically before anything reaches a form field.
+Validating that the Case Description text lines up with the uploaded files is a **blocking step before pre-fill**, not a report produced alongside it. Nothing reaches a form field until the comparison has run and every blocking flag has been resolved by a person.
 
 ```mermaid
 flowchart LR
@@ -207,15 +207,19 @@ flowchart LR
     L -- No --> N["Pre-fill with<br/>per-field provenance"]
 ```
 
-### 4.2 Provenance per field, not per document
+### 4.2 One schema, with provenance on every field
 
-One confidence score for an entire extraction cannot support per-field flags or a per-field "where did this come from" tooltip. Provenance attaches to each value:
+Two decisions in this schema are what make the comparison above possible.
+
+**Both sides target the same shape.** The typed prompt and each uploaded document are extracted into `CaseFieldsV1` — same fields, same types. That converts "does the description line up with the files?" from re-parsing free text on every check into a field-by-field comparison of typed objects, which is what lets the deterministic checks in §4.4 run at all.
+
+**Every field carries its own value, confidence, and provenance**, rather than the extraction carrying one of each. The difference is between knowing *"this extraction is 0.8 confident and came from contract.pdf"* and knowing *"`status_expiry_date` is 0.62 confident, read from 'valid until 12 March 2025' on page 3."* Only the second can support the per-field origin tooltip in §3, flagging one field while the rest pre-fill normally (§4.3), or answering months later where one specific value came from.
 
 ```python
 class Provenance(BaseModel):
     source: str                  # "prompt" | fileId
     page: int | None = None
-    quote: str                   # verbatim span, verified to exist in that source
+    quote: str                   # the verbatim span this value was read from
 
 class Extracted[T](BaseModel):
     value: T | None = None
@@ -229,6 +233,8 @@ class CaseFieldsV1(BaseModel):
     refusal_date:       Extracted[date]     # shifts the s.182 clock start
     case_type:          Extracted[Literal["restoration", "extension", "appeal", "other"]]
 ```
+
+`quote` holds the verbatim span a value was read from — kept not for display but because §4.4 verifies it against the source text before trusting anything derived from it. `Extracted[T]` is a generic wrapper, so `Extracted[date]` still validates as a date while carrying its metadata alongside.
 
 ### 4.3 Severity, including asymmetry
 
