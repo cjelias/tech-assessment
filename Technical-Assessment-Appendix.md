@@ -22,9 +22,10 @@ This covers material your email indicated would come up in the final conversatio
 | B | The privilege discussion is engineering-informed, not legal advice | Needs counsel and law-society confirmation before it drives contract terms |
 | C | Multi-tenant, with user accounts (`org_id`, `created_by`) | Not stated; single-tenant would simplify the model |
 | C | Five tables is a sketch, not a complete model | Omits auth, the form registry, field mapping, and billing |
-| D | SSR or SSG is in use | Hydration handling is unnecessary in a pure client-rendered SPA |
-| D | Autosave payloads stay under 64 KB | `fetch` with `keepalive` is capped there. A 5,000-word draft is roughly 30 KB so it fits, but a larger field would fail silently — worth a guard |
-| E | Python 3.12+, Pydantic v2, rapidfuzz; fuzzy threshold 90 | Dependency and tuning choices |
+| D | Next.js 16.1 App Router with server rendering | Hydration handling is unnecessary in a pure client-rendered SPA |
+| D | Autosave payloads stay under the 64 KB `keepalive` cap | A 5,000-word draft is roughly 30 KB, so it fits; the code guards the flag rather than assuming it |
+| E | Python 3.14, Pydantic v2, rapidfuzz; fuzzy threshold 90 | Dependency and tuning choices; §F covers what 3.14 changes |
+| F | The extraction worker's dependency stack can be audited and pinned | Free-threading is only safe where you control every C extension |
 | E | `check_restoration` is illustrative | Claim construction is elided (`claims=[...]`) |
 
 ---
@@ -139,11 +140,12 @@ Three choices worth calling out. `schema_version` on `extractions` means a schem
 
 ## D. Store Implementation Notes
 
-The main response shows the store shape. Two details matter in a Next.js codebase specifically.
+The main response shows the store shape. Two details matter in a Next.js 16 App Router codebase specifically.
 
 **Hydration.** `sessionStorage` doesn't exist during server rendering, and rehydrating during render produces a mismatch between server and client markup. With `skipHydration: true`, rehydration is triggered from an effect and consumers gate on it:
 
 ```typescript
+'use client';
 // components/StoreHydration.tsx — rendered once in the root layout
 export function StoreHydration() {
   useEffect(() => { useCaseDraftStore.persist.rehydrate(); }, []);
@@ -158,20 +160,25 @@ if (!hydrated) return <DraftSkeleton />;
 **Debounced autosave**, subscribed at the store rather than wired into a component, so it survives navigation like the store does:
 
 ```typescript
+const KEEPALIVE_LIMIT = 64 * 1024;   // browsers cap keepalive request bodies
+
 const save = debounce((s: CaseDraftState) => {
   if (!s.caseId) return;
+  const body = JSON.stringify({ promptText: s.promptText, analysisRole: s.analysisRole });
   fetch(`/api/cases/${s.caseId}/draft`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ promptText: s.promptText, analysisRole: s.analysisRole }),
-    keepalive: true,          // survives a tab close mid-flight
+    body,
+    // Survives a tab close mid-flight, but only under the cap — over it the
+    // request is rejected outright, so fall back rather than lose the save.
+    keepalive: new Blob([body]).size < KEEPALIVE_LIMIT,
   });
 }, 800);
 
 useCaseDraftStore.subscribe(save);
 ```
 
-`keepalive` matters more than it looks: without it, the final debounced save is cancelled when the tab closes, which reintroduces data loss at exactly the moment the user assumes their work is safe.
+`keepalive` matters more than it looks: without it, the final debounced save is cancelled when the tab closes, which reintroduces data loss at exactly the moment the user assumes their work is safe. The cap matters just as much in the other direction — a 5,000-word description is around 30 KB so it fits today, but setting `keepalive` on an oversized body fails the request entirely rather than degrading, so the flag is conditional rather than always on.
 
 ---
 
@@ -242,3 +249,32 @@ def check_restoration(fields: CaseFieldsV1, today: date) -> DiscrepancyFlag | No
 ```
 
 The reason this belongs in code rather than a prompt: the answer is arithmetic over two dates, the consequence of getting it wrong is an ineligible filing, and no amount of model quality makes a probabilistic answer preferable to a deterministic one when a deterministic one exists.
+
+---
+
+## F. What Python 3.14 Actually Changes Here
+
+Targeting 3.14 rather than 3.12 is worth more than a version bump for this particular backend, though one of the headline features is a judgement call rather than a free win.
+
+**Free-threading (PEP 779) — evaluate, don't assume.** This is the one that matters most and deserves the most caution. The extraction stage is genuinely CPU-bound, which is the workload the GIL has always punished: threads gave you nothing, so the answer was process pools and their memory cost. Free-threading is officially supported in 3.14 and reports near-linear scaling on CPU-bound work, with single-threaded overhead down to roughly 5–10% from ~40% in 3.13.
+
+The caveats are real and specific:
+
+- It's a **separate opt-in build** (`python3.14t`), not the default interpreter.
+- If any imported C extension hasn't opted in, the interpreter **silently re-enables the GIL** — you pay the overhead and get none of the parallelism, with no error to tell you.
+- The gain is uneven across this pipeline. `pdfplumber` is largely pure Python and would benefit; Tesseract runs as a subprocess and wouldn't care either way; Pillow and NumPy sit somewhere in between depending on version.
+- Memory runs roughly 15–20% higher, since the free-threaded build uses mimalloc rather than pymalloc.
+
+So the honest recommendation is not "switch the backend." It's that the **extraction worker is the right candidate** — it's already an isolated queue consumer in §3 with a dependency stack small enough to audit and pin, which is exactly the profile the ecosystem guidance calls for. Benchmark it against the existing process pool, assert `sys._is_gil_enabled() is False` at worker startup so a silent GIL re-enable fails loudly instead of quietly halving throughput, and leave the API service on the default build where it would only pay the overhead. If it doesn't win, PEP 734 subinterpreters (`concurrent.interpreters`) are the other new option, with better isolation than threads and lower cost than processes.
+
+**Things that are straightforwardly better, no trade-off:**
+
+| Feature | Why it matters here |
+|---|---|
+| `uuid.uuid7()` native | The design keys everything on UUIDv7. In 3.12 that meant a third-party dependency; now it's stdlib, and the time-ordering gives better index locality on `cases` and `case_files` than random v4 |
+| t-strings (PEP 750) | Prompt assembly keeps document-derived text structurally separate from instructions rather than concatenated — see §3 of the main response |
+| PEP 768 debugger interface | Attach to a running extraction worker and inspect in-flight asyncio tasks without restarting it. Directly useful for the triage in §1.3, and for a stuck job in production |
+| `compression.zstd` (PEP 784) | `extraction_events` stores raw prompt/response pairs and has to be retained for years. Compressing payloads with a stdlib codec, no new dependency, is a meaningful storage win on the audit log |
+| Deferred annotations (PEP 649) | Pydantic forward references resolve without `from __future__ import annotations`, and import cost drops — minor, but this codebase is schema-heavy |
+
+**What I'd ignore for now:** the experimental JIT and the tail-call interpreter both need a source build and offer modest gains, which isn't a trade worth making on a system whose bottleneck is OCR and network calls to a model provider, not interpreter dispatch.

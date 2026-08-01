@@ -17,8 +17,8 @@ This is written without access to the repository, a running environment, logs, o
 |---|---|---|
 | Diagnosis | §1 names *candidate* causes, not confirmed ones — no repo, environment, or logs | §1.3 reorders which fix ships first, not the architecture |
 | Diagnosis | The page-2 screenshot is current production UI | The `accept`-filter finding drops; failure points 5–7 stand alone |
-| Stack | Next.js 13+ / React 18+, either router | Store placement changes file; "above the router" holds |
-| Stack | Postgres; Python 3.12+ with Pydantic v2 | Appendix C's DDL and the `Extracted[T]` syntax change; the model doesn't |
+| Stack | Next.js 16.1, React 19.2, App Router, React Compiler enabled | On Pages Router the store moves to `_app.tsx` and the `<Activity>` option in §1.1 disappears |
+| Stack | Postgres; Python 3.14 with Pydantic v2 (see Appendix F) | Appendix C's DDL and the `Extracted[T]` syntax change; the model doesn't |
 | Stack | Object storage, job queue, and vector index available or fundable | Appendix A is the plan for when they aren't |
 | Stack | Hosted LLM API with function calling, no access to weights | Cross-attention (§4.4) becomes viable with owned weights |
 | Stack | More than one backend replica, or serverless | Failure #8 disappears on a single long-lived process |
@@ -43,7 +43,11 @@ A route change swaps the matched component, which **unmounts** the old tree: eff
 
 Files are more fragile than text. A `File` handle is an in-memory reference tied to that DOM node: not JSON-serializable, unable to survive a `sessionStorage` round-trip, and destroyed with the input element. A fix addressing only the text would leave attachments broken.
 
-Two variants to rule out in triage, because each changes the fix. If the tabs are conditional renders (`{active === 'case' && <CaseDescription/>}`) rather than routes, the unmount is identical but the fix may be as small as toggling visibility. And if the sidebar uses a plain `<a href>` rather than `<Link>`, that's a full document load, destroying in-memory state *and* any store with it — no state library helps until the link is fixed.
+Two variants to rule out in triage, because each changes the fix entirely.
+
+**If the two panels are conditional renders inside one route** (`{active === 'case' && <CaseDescription/>}`) rather than separate route segments, the unmount is the same but React 19.2 offers a first-class fix. Wrapping each panel in `<Activity mode={...}>` hides it with `display: none` instead of unmounting: state is preserved, Effects are torn down and re-created, and crucially the **DOM survives too**. Because the `<input type="file">` element itself is never destroyed, its `FileList` survives with it — the one scenario where the attachment half of this bug is a few lines rather than an architecture change. React's own documentation uses a tab switcher losing textarea draft text as the canonical example. This does not extend across App Router route segments, though; the router still unmounts those, so a routed layout needs the store in §2.
+
+**If the sidebar uses a plain `<a href>` rather than `<Link>`**, that's a full document load, destroying in-memory state *and* any store with it. No state library helps until the link is fixed.
 
 **In one line:** state lives in a component that gets unmounted, and file handles are never lifted out of the DOM into anything durable before that happens.
 
@@ -70,6 +74,8 @@ The screenshot in your brief does more diagnostic work than it appears to. The d
 
 Before writing code: check whether the upload request's `Content-Type` is `multipart/form-data` and a file part is actually present; test the input's `accept` attribute against a `.png`; log the fully assembled prompt server-side and look for extracted document text in it; and confirm the extraction survives a backend restart. That sequence separates failures 1–4 from 5–8 in about twenty minutes, and it decides which fix ships first.
 
+On Python 3.14 the backend half gets easier: `pdb` can attach to a live process and PEP 768's external debugger interface lets you inspect in-flight asyncio tasks without a restart. That matters when the symptom is "extraction silently hangs" rather than "extraction throws," which is the harder of the two to reproduce locally.
+
 ---
 
 ## 2. Architectural Solution & State Management
@@ -93,14 +99,14 @@ The reported defect only requires tier one. An in-memory store above the router 
 
 - **Zustand (selected).** A module-level store created outside the component tree, so a route change structurally cannot unmount it. Selector subscriptions mean `useCaseDraftStore((s) => s.promptText)` re-renders only what reads that slice — which matters for a textarea firing on every keystroke. `persist` middleware supplies tier two without hand-rolled serialization.
 - **Redux Toolkit + `redux-persist`.** The right call if the org already standardizes on Redux, where devtools and time-travel debugging genuinely help during a rescue. For a single case-draft object it's more ceremony than the problem needs, so I'd adopt it for codebase consistency, not on merits here.
-- **Context API.** Solves placement and prop-drilling, honestly half the problem — a Provider above the routes does survive the unmount. It lacks serialization, persistence, and selector granularity: every consumer re-renders on any change, the wrong default for per-keystroke updates. Context plus `useReducer` plus a hand-written storage sync converges on what Zustand already ships.
+- **Context API.** Solves placement and prop-drilling, honestly half the problem — a Provider above the routes does survive the unmount. It lacks serialization, persistence, and selector granularity: every consumer re-renders when the provider's value changes, the wrong default for per-keystroke updates. React Compiler doesn't change that — it removes manual `useMemo`/`useCallback`, but a component calling `useContext` still re-renders on any change to that value regardless of which field it reads. Context plus `useReducer` plus a hand-written storage sync converges on what Zustand already ships.
 - **Browser storage is three tools, not one.** `sessionStorage` (~5MB, per-tab, cleared on close) suits a draft that shouldn't outlive the session. `localStorage` (~5–10MB, shared across tabs) writes client PII to disk indefinitely — wrong posture for case data. IndexedDB is the only tier large and async enough to buffer file bytes. None has a reactivity model, so none replaces a store.
 - **TanStack Query** is complementary, not competing: it owns the server cache — autosave mutations, status polling, refetch on focus — while Zustand owns the local draft. That boundary avoids duplicating server data into a client store and then fighting to keep it fresh.
 - Not selected: URL/search-param state (unbounded prompt text doesn't belong in a URL) and Jotai/Valtio (fine, no advantage here).
 
 ### 2.3 Store placement and shape
 
-The load-bearing move is placing the store **above the router boundary** — `_app.tsx`, or the root `layout.tsx` under the App Router, where layouts persist across route-segment changes while page segments unmount.
+The load-bearing move is placing the store **above the router boundary** — the root `layout.tsx`, which persists across route-segment changes while page segments unmount. The store module carries `'use client'`; both pages are Client Components regardless, since both are interactive forms.
 
 ```mermaid
 flowchart TB
@@ -120,6 +126,7 @@ flowchart TB
 ```
 
 ```typescript
+'use client';
 // stores/useCaseDraftStore.ts — module singleton, created above the router
 type FileStatus = 'uploading' | 'uploaded' | 'queued'
                 | 'extracting' | 'analyzing' | 'ready' | 'failed';
@@ -145,7 +152,7 @@ export const useCaseDraftStore = create<CaseDraftState>()(
     {
       name: 'lextar-case-draft',
       storage: createJSONStorage(() => sessionStorage),
-      // Next.js: sessionStorage is absent server-side and rehydrating during
+      // sessionStorage is absent during server rendering, and rehydrating in
       // render causes a hydration mismatch — rehydrate from an effect instead.
       skipHydration: true,
       // promptText is deliberately NOT written to the browser: per your own
@@ -159,9 +166,11 @@ export const useCaseDraftStore = create<CaseDraftState>()(
 
 `analysisRole` mirrors the four roles in your UI, since the selected role changes how extracted data should be framed and belongs in the same durable draft.
 
+On Next 16 the autosave and upload endpoints can be Server Functions rather than route handlers — same contract, less boilerplate, typed end to end. I've drawn them as routes because the extraction backend is likely the Python service rather than Next, and I'd rather the frontend talk to one API surface than two.
+
 ### 2.4 Binary uploads across page transitions
 
-`File` objects should never enter frontend state past the moment of selection. On selection, stream immediately to `POST /cases/:id/files` (or a presigned S3/GCS URL) rather than waiting for form submission. The backend persists the bytes and returns a **serializable** reference — `{ fileId, filename, mimeType, sizeBytes, status }` — and only that reference enters the store: small, JSON-safe, independent of the browser's in-memory handle. Application Forms never needs the bytes; it resolves `fileId`s against the backend for status and results. For resilience mid-upload, an IndexedDB queue (`idb-keyval`) can hold not-yet-uploaded bytes so an interrupted upload resumes — hardening, not required for the core fix.
+`File` objects should never enter frontend state past the moment of selection. On selection, stream immediately to `POST /cases/:id/files` (or a presigned S3/GCS URL) rather than waiting for form submission. The backend persists the bytes and returns a **serializable** reference — `{ fileId, filename, mimeType, sizeBytes, status }` — and only that reference enters the store: small, JSON-safe, independent of the browser's in-memory handle. Application Forms never needs the bytes; it resolves `fileId`s against the backend for status and results. `useOptimistic` renders the file row at `uploading` the instant it's selected, so the list never lags the user's action while the request is in flight. For resilience mid-upload, an IndexedDB queue (`idb-keyval`) can hold not-yet-uploaded bytes so an interrupted upload resumes — hardening, not required for the core fix.
 
 This addresses both defects at once: nothing large or unserializable sits in component state, and files begin processing the moment they're selected, decoupled from whatever the user does next.
 
@@ -210,6 +219,8 @@ flowchart TB
 ```
 
 Four decisions carry this. **Extraction is asynchronous** — OCR and LLM calls take seconds to minutes, so the upload endpoint returns a `fileId` and status immediately rather than blocking. **The server is the source of truth, keyed by `caseId`**, making Application Forms independent of anything a component held in memory and fixing failure #8. **The token budget is explicit**: the typed prompt gets a fixed reservation and document content is retrieved rather than concatenated, so growth in document size degrades retrieval quality instead of silently discarding evidence. **LLM output is schema-constrained** through function calling with Pydantic validation, so malformed output is caught rather than quietly corrupting form fields.
+
+**On prompt assembly specifically** — failure #6 above, and the point where third-party document text meets your instructions. Python 3.14's t-strings (PEP 750) fit this well: unlike an f-string, a `Template` keeps static and interpolated parts separate, so the assembler can tag, delimit, or escape document-derived spans as *data* instead of concatenating them into the instruction stream. That isn't prompt-injection protection on its own, but it gives you one seam to enforce a policy at rather than trusting every call site to remember. In a system whose inputs are documents supplied by opposing parties, that seam is worth having.
 
 **Lifecycle visibility.** A user should never wonder whether the system saw their file. Each file carries a status rendered as a badge — `Uploading → Uploaded → Queued → Extracting → Analyzing → Ready`, with `Failed` reachable from any stage and retry returning it to `Queued`. Because status comes from the shared store plus polling or SSE rather than local state, the same case-level indicator appears on **both** pages. Rejected file types raise an explicit error at selection instead of silent omission — that alone would have surfaced Defect 2 months earlier — completion and failure raise toasts, and every pre-filled field is marked with its origin ("AI-filled from contract.pdf, p.3") so AI-filled and hand-edited values stay distinguishable.
 
