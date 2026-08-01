@@ -2,10 +2,17 @@
 
 **Lextar AI Document Processing Workflow — Case Description → Application Forms**
 Chris Elias · A companion appendix covers the pivot strategy, compliance posture, and schemas. This document stands alone.
+Numbered sections (§0–§4) are in this response, lettered ones (Appendix A–F) in the companion. Every reference is a link.
 
 ---
 
 To close the two questions your note left open: my work at FoodLogiQ, Smile CDR, and O'Reilly has been hands-on throughout — writing and reviewing production code in the ingestion, normalization, and provenance layers I was also architecting, which is why this leans on schemas and code rather than diagrams alone. On availability, I'm looking for one substantial engagement, not a side project stacked behind other commitments. Rescue work needs someone reachable in your hours and in the codebase daily, and that's what I'd be signing up for. Per your encouragement on AI tooling, I used Claude Code to draft and diagram faster; the diagnosis and the trade-off calls are mine.
+
+---
+
+**Contents** — [0. Assumptions](#0-assumptions) · [1. Root Cause Analysis](#1-root-cause-analysis) ([1.1 state loss](#11-why-the-frontend-forgets-text-and-files-on-navigation) · [1.2 AI blindness](#12-why-the-ai-is-blind-to-the-uploaded-pdfs-and-pngs) · [1.3 first-hour triage](#13-confirming-this-in-the-first-hour)) · [2. Architecture & State](#2-architectural-solution--state-management) ([2.1 selection criterion](#21-the-selection-criterion-what-each-layer-must-survive) · [2.2 tools compared](#22-tools-considered-and-why) · [2.3 store shape](#23-store-placement-and-shape) · [2.4 binary uploads](#24-binary-uploads-across-page-transitions)) · [3. Data Pipeline & Error Handling](#3-data-pipeline--error-handling) · [4. Cross-Reference Validation](#4-cross-reference-validation--anomaly-detection) ([4.1 a gate](#41-a-gate-not-a-report) · [4.2 schema & provenance](#42-one-schema-with-provenance-on-every-field) · [4.3 severity](#43-severity-including-asymmetry) · [4.4 methods](#44-methods-by-category) · [4.5 string similarity](#45-choosing-a-string-similarity-metric) · [4.6 surfacing](#46-surfacing-discrepancies))
+
+**Appendix** — [A pivot strategy](Technical-Assessment-Appendix.md#a-resource-constrained-pivot-strategy) · [B provenance & compliance](Technical-Assessment-Appendix.md#b-provenance-audit-and-canadian-compliance-posture) · [C data model](Technical-Assessment-Appendix.md#c-data-model-sketch) · [D store implementation](Technical-Assessment-Appendix.md#d-store-implementation-notes) · [E validation code](Technical-Assessment-Appendix.md#e-validation-implementations) · [F Python 3.14](Technical-Assessment-Appendix.md#f-what-python-314-actually-changes-here)
 
 ---
 
@@ -15,17 +22,17 @@ This is written without access to the repository, a running environment, logs, o
 
 | Area | Assumption | If it's wrong |
 |---|---|---|
-| Diagnosis | §1 names *candidate* causes, not confirmed ones — no repo, environment, or logs | §1.3 reorders which fix ships first, not the architecture |
+| Diagnosis | [§1](#1-root-cause-analysis) names *candidate* causes, not confirmed ones — no repo, environment, or logs | [§1.3](#13-confirming-this-in-the-first-hour) reorders which fix ships first, not the architecture |
 | Diagnosis | The page-2 screenshot is current production UI | The `accept`-filter finding drops; failure points 5–7 stand alone |
-| Stack | Next.js 16.1, React 19.2, App Router, React Compiler enabled | On Pages Router the store moves to `_app.tsx` and the `<Activity>` option in §1.1 disappears |
-| Stack | Postgres; Python 3.14 with Pydantic v2 (see Appendix F) | Appendix C's DDL and the `Extracted[T]` syntax change; the model doesn't |
-| Stack | Object storage, job queue, and vector index available or fundable | Appendix A is the plan for when they aren't |
-| Stack | Hosted LLM API with function calling, no access to weights | Cross-attention (§4.4) becomes viable with owned weights |
+| Stack | Next.js 16.1, React 19.2, App Router, React Compiler enabled | On Pages Router the store moves to `_app.tsx` and the `<Activity>` option in [§1.1](#11-why-the-frontend-forgets-text-and-files-on-navigation) disappears |
+| Stack | Postgres; Python 3.14 with Pydantic v2 (see [Appendix F](Technical-Assessment-Appendix.md#f-what-python-314-actually-changes-here)) | [Appendix C](Technical-Assessment-Appendix.md#c-data-model-sketch)'s DDL and the `Extracted[T]` syntax change; the model doesn't |
+| Stack | Object storage, job queue, and vector index available or fundable | [Appendix A](Technical-Assessment-Appendix.md#a-resource-constrained-pivot-strategy) is the plan for when they aren't |
+| Stack | Hosted LLM API with function calling, no access to weights | Cross-attention ([§4.4](#44-methods-by-category)) becomes viable with owned weights |
 | Stack | More than one backend replica, or serverless | Failure #8 disappears on a single long-lived process |
 | Domain | Canadian immigration practice; IRPR s.182 live for these users | `CaseFieldsV1` and the s.182 rule swap out; the provenance pattern doesn't |
-| Domain | Application Forms has an enumerable field schema to map into | §3's mapping needs a form registry before §4 is useful |
+| Domain | Application Forms has an enumerable field schema to map into | [§3](#3-data-pipeline--error-handling)'s mapping needs a form registry before [§4](#4-cross-reference-validation--anomaly-detection) is useful |
 | Domain | Statutory rules in code get counsel sign-off and an effective date | A process requirement, not a code one — encoding a misread rule is worse than encoding none |
-| Domain | Case data is PII and may be privileged | Appendix B's residency and privilege posture relaxes considerably |
+| Domain | Case data is PII and may be privileged | [Appendix B](Technical-Assessment-Appendix.md#b-provenance-audit-and-canadian-compliance-posture)'s residency and privilege posture relaxes considerably |
 | Product | Upload-on-selection is acceptable; drafts exist before submit | Falls back to upload-on-submit; files can't pre-process |
 | Product | A human reviewer clears blocking flags | Blocking pre-fill becomes a queue nobody drains |
 | Product | Typed case text stays out of browser storage as PII | Drop `partialize` and the draft survives refresh too |
@@ -45,7 +52,7 @@ Files are more fragile than text. A `File` handle is an in-memory reference tied
 
 Two variants to rule out in triage, because each changes the fix entirely.
 
-**If the two panels are conditional renders inside one route** (`{active === 'case' && <CaseDescription/>}`) rather than separate route segments, the unmount is the same but React 19.2 offers a first-class fix. Wrapping each panel in `<Activity mode={...}>` hides it with `display: none` instead of unmounting: state is preserved, Effects are torn down and re-created, and crucially the **DOM survives too**. Because the `<input type="file">` element itself is never destroyed, its `FileList` survives with it — the one scenario where the attachment half of this bug is a few lines rather than an architecture change. React's own documentation uses a tab switcher losing textarea draft text as the canonical example. This does not extend across App Router route segments, though; the router still unmounts those, so a routed layout needs the store in §2.
+**If the two panels are conditional renders inside one route** (`{active === 'case' && <CaseDescription/>}`) rather than separate route segments, the unmount is the same but React 19.2 offers a first-class fix. Wrapping each panel in `<Activity mode={...}>` hides it with `display: none` instead of unmounting: state is preserved, Effects are torn down and re-created, and crucially the **DOM survives too**. Because the `<input type="file">` element itself is never destroyed, its `FileList` survives with it — the one scenario where the attachment half of this bug is a few lines rather than an architecture change. React's own documentation uses a tab switcher losing textarea draft text as the canonical example. This does not extend across App Router route segments, though; the router still unmounts those, so a routed layout needs the store in [§2](#2-architectural-solution--state-management).
 
 **If the sidebar uses a plain `<a href>` rather than `<Link>`**, that's a full document load, destroying in-memory state *and* any store with it. No state library helps until the link is fixed.
 
@@ -66,7 +73,7 @@ The screenshot in your brief does more diagnostic work than it appears to. The d
 | 7 | Context budget | Document text truncated to fit the window while the typed prompt survives | **Most likely** — see below |
 | 8 | Persistence | Extraction held in process memory; a second replica serves Application Forms nothing | Likely at any real scale |
 
-**The asymmetric token budget (#7) is a root cause, not a caveat.** The word counter reads `0 / 5,000` and meters *only* the typed text — uploaded files are not counted against it. So the product caps its smallest input at roughly 6,700 tokens while the genuinely large one, a multi-page contract at 15–20k tokens or more, has no cap anywhere. If prompt assembly reserves the user's text and truncates document content to fit, the observable result is exactly what your report describes: *the AI focuses on the typed text prompts* and appears blind to the documents. That also means document text cannot simply be concatenated into a prompt — the pipeline needs an explicit token budget with retrieval over chunked content (§3).
+**The asymmetric token budget (#7) is a root cause, not a caveat.** The word counter reads `0 / 5,000` and meters *only* the typed text — uploaded files are not counted against it. So the product caps its smallest input at roughly 6,700 tokens while the genuinely large one, a multi-page contract at 15–20k tokens or more, has no cap anywhere. If prompt assembly reserves the user's text and truncates document content to fit, the observable result is exactly what your report describes: *the AI focuses on the typed text prompts* and appears blind to the documents. That also means document text cannot simply be concatenated into a prompt — the pipeline needs an explicit token budget with retrieval over chunked content ([§3](#3-data-pipeline--error-handling)).
 
 **On #8:** the intended workflow states the backend "saves the structured extraction in memory." Behind a load balancer with more than one replica, or on a serverless runtime, the Application Forms request can land on an instance that never performed the extraction — reproducing the second half of Defect 2 even when extraction worked perfectly.
 
@@ -246,9 +253,9 @@ flowchart LR
 
 Two decisions in this schema are what make the comparison above possible.
 
-**Both sides target the same shape.** The typed prompt and each uploaded document are extracted into `CaseFieldsV1` — same fields, same types. That converts "does the description line up with the files?" from re-parsing free text on every check into a field-by-field comparison of typed objects, which is what lets the deterministic checks in §4.4 run at all.
+**Both sides target the same shape.** The typed prompt and each uploaded document are extracted into `CaseFieldsV1` — same fields, same types. That converts "does the description line up with the files?" from re-parsing free text on every check into a field-by-field comparison of typed objects, which is what lets the deterministic checks in [§4.4](#44-methods-by-category) run at all.
 
-**Every field carries its own value, confidence, and provenance**, rather than the extraction carrying one of each. The difference is between knowing *"this extraction is 0.8 confident and came from contract.pdf"* and knowing *"`status_expiry_date` is 0.62 confident, read from 'valid until 12 March 2025' on page 3."* Only the second can support the per-field origin tooltip in §3, flagging one field while the rest pre-fill normally (§4.3), or answering months later where one specific value came from.
+**Every field carries its own value, confidence, and provenance**, rather than the extraction carrying one of each. The difference is between knowing *"this extraction is 0.8 confident and came from contract.pdf"* and knowing *"`status_expiry_date` is 0.62 confident, read from 'valid until 12 March 2025' on page 3."* Only the second can support the per-field origin tooltip in [§3](#3-data-pipeline--error-handling), flagging one field while the rest pre-fill normally ([§4.3](#43-severity-including-asymmetry)), or answering months later where one specific value came from.
 
 ```python
 class Provenance(BaseModel):
@@ -269,7 +276,7 @@ class CaseFieldsV1(BaseModel):
     case_type:          Extracted[Literal["restoration", "extension", "appeal", "other"]]
 ```
 
-`quote` holds the verbatim span a value was read from — kept not for display but because §4.4 verifies it against the source text before trusting anything derived from it. `Extracted[T]` is a generic wrapper, so `Extracted[date]` still validates as a date while carrying its metadata alongside.
+`quote` holds the verbatim span a value was read from — kept not for display but because [§4.4](#44-methods-by-category) verifies it against the source text before trusting anything derived from it. `Extracted[T]` is a generic wrapper, so `Extracted[date]` still validates as a date while carrying its metadata alongside.
 
 ### 4.3 Severity, including asymmetry
 
@@ -294,11 +301,11 @@ class DiscrepancyFlag(BaseModel):
 
 Modelling a flag as a list of claims rather than a `prompt_value`/`document_value` pair is what lets one comparator also handle **document-versus-document** conflicts: two uploaded permits with different expiry dates yield a single flag with two claims and no prompt claim at all.
 
-**A worked example from your own placeholder text.** It reads *"My client's study permit expired 45 days ago… restoration of status under IRPR s.182."* Section 182(1) allows 90 calendar days to apply, and the Federal Court has held that officers have no discretion to extend it. So if the prompt says 45 days but the uploaded permit shows 120, that's a `contradiction` that changes eligibility — caught deterministically from two dates, with no model involved. The subtler case is `document_only`: the client uploads an IRCC refusal letter they never mentioned, which moves the clock start from the expiry date to the day after the refusal. Nothing contradicts anything; they simply didn't mention the document that moved the deadline. A comparator looking only for contradictions ships an out-of-time filing. (Implementation in Appendix E.)
+**A worked example from your own placeholder text.** It reads *"My client's study permit expired 45 days ago… restoration of status under IRPR s.182."* Section 182(1) allows 90 calendar days to apply, and the Federal Court has held that officers have no discretion to extend it. So if the prompt says 45 days but the uploaded permit shows 120, that's a `contradiction` that changes eligibility — caught deterministically from two dates, with no model involved. The subtler case is `document_only`: the client uploads an IRCC refusal letter they never mentioned, which moves the clock start from the expiry date to the day after the refusal. Nothing contradicts anything; they simply didn't mention the document that moved the deadline. A comparator looking only for contradictions ships an out-of-time filing. (Implementation in [Appendix E](Technical-Assessment-Appendix.md#e-validation-implementations).)
 
 ### 4.4 Methods, by category
 
-- **Deterministic first, because it's cheap and certain.** Pydantic/JSON Schema validation for required-field presence and type conformance; normalizing dates to ISO-8601 before comparison so "45 days ago" resolves against an explicit date in the PDF; codified statutory rules like the s.182 check above; and approximate string matching for names and identifiers, where the choice of metric matters enough that §4.5 covers it separately. Anything answerable this way should never reach a model.
+- **Deterministic first, because it's cheap and certain.** Pydantic/JSON Schema validation for required-field presence and type conformance; normalizing dates to ISO-8601 before comparison so "45 days ago" resolves against an explicit date in the PDF; codified statutory rules like the s.182 check above; and approximate string matching for names and identifiers, where the choice of metric matters enough that [§4.5](#45-choosing-a-string-similarity-metric) covers it separately. Anything answerable this way should never reach a model.
 - **Semantic comparison for narrative fields.** Embedding cosine similarity as a cheap first pass to find which statements are *about* the same thing, then a **Natural Language Inference** classifier over those pairs for entailment / contradiction / neutral. The ordering matters: similarity tells you two statements are topically related, never that they disagree. NLI is built for contradiction specifically.
 - **A grounded LLM judge, verified.** A verifier prompt separate from the extraction call — so the same failure mode isn't grading its own work — receives both structured objects plus source spans and returns schema-validated flags. Requiring a citation is necessary but *not sufficient*: a required string field catches a missing citation, not a fabricated one, and a model can invent a plausible quote that validates cleanly. So each cited span is checked against the real source before the flag is accepted:
 
@@ -312,8 +319,8 @@ def citations_must_exist(self, info):
     return self
 ```
 
-  A flag that can't be traced to real text fails validation and never reaches the UI. Malformed responses trigger a bounded retry (Instructor, or `model_validate` with a retry wrapper) rather than corrupting the report. `partial_ratio` is deliberate here rather than the Levenshtein call in §4.5: this task is locating a span inside a long document, so substring alignment is the property that matters and the drift is transcription-level, not the character substitution you get on a short fixed-format identifier.
-- **RAG evaluation as a regression harness.** Because §3 retrieves document spans rather than concatenating them, retrieval quality becomes a correctness risk — a missed chunk looks identical to a missing field. I'd keep a labelled fixture set of case packets and score every pipeline change offline with RAGAS or DeepEval on **context recall** (did retrieval surface the span containing the answer) and **faithfulness** (is each extracted value grounded in retrieved context). That turns "the AI got worse after we changed the chunker" from a support ticket into a failing build — the difference between a demo and something defensible in a government review.
+  A flag that can't be traced to real text fails validation and never reaches the UI. Malformed responses trigger a bounded retry (Instructor, or `model_validate` with a retry wrapper) rather than corrupting the report. `partial_ratio` is deliberate here rather than the Levenshtein call in [§4.5](#45-choosing-a-string-similarity-metric): this task is locating a span inside a long document, so substring alignment is the property that matters and the drift is transcription-level, not the character substitution you get on a short fixed-format identifier.
+- **RAG evaluation as a regression harness.** Because [§3](#3-data-pipeline--error-handling) retrieves document spans rather than concatenating them, retrieval quality becomes a correctness risk — a missed chunk looks identical to a missing field. I'd keep a labelled fixture set of case packets and score every pipeline change offline with RAGAS or DeepEval on **context recall** (did retrieval surface the span containing the answer) and **faithfulness** (is each extracted value grounded in retrieved context). That turns "the AI got worse after we changed the chunker" from a support ticket into a failing build — the difference between a demo and something defensible in a government review.
 - **On cross-attention specifically.** Inspecting attention weights is a model-internals interpretability technique — real, but available only when you control the weights, as with a fine-tuned encoder over prompt/document pairs. It isn't exposed by a hosted API, and attention maps are weak evidence of causal attribution even when you have them. The production equivalent is the grounded judge above: functionally "attend across both sources," done through prompting, and unlike an attention map it yields a citation a human can check.
 
 ### 4.5 Choosing a string-similarity metric
@@ -345,12 +352,12 @@ Its documented behaviour is also its trap. **Token-set ratio returns 100 when on
 
 **Normalize before either.** An OCR-aware normalization pass — case folding, stripping separators and diacritics, mapping known confusion classes — is worth more than the choice of metric, because it removes the noise rather than tolerating it.
 
-**And neither asserts equality.** A fuzzy match in this system produces a `low_confidence` or `contradiction` flag for a person to resolve (§4.3). It never silently merges two values: the cost of wrongly merging two clients' identifiers is nowhere near symmetric with the cost of asking.
+**And neither asserts equality.** A fuzzy match in this system produces a `low_confidence` or `contradiction` flag for a person to resolve ([§4.3](#43-severity-including-asymmetry)). It never silently merges two values: the cost of wrongly merging two clients' identifiers is nowhere near symmetric with the cost of asking.
 
 ### 4.6 Surfacing discrepancies
 
-Flags render inline beside the affected field, showing each conflicting value with its source ("prompt" versus "contract.pdf p.3") and a one-line explanation. Blocking severities leave the field **empty** with a warning rather than silently picking a winner, and require an explicit decision recorded against the resolver's identity — appended rather than overwriting the previous one, since a resolved flag can be re-raised when a later document arrives (appendix §B). Non-blocking flags pre-fill but stay visually marked. The principle throughout: the system never resolves a legal ambiguity on the user's behalf, and never hides that one existed.
+Flags render inline beside the affected field, showing each conflicting value with its source ("prompt" versus "contract.pdf p.3") and a one-line explanation. Blocking severities leave the field **empty** with a warning rather than silently picking a winner, and require an explicit decision recorded against the resolver's identity — appended rather than overwriting the previous one, since a resolved flag can be re-raised when a later document arrives ([Appendix B](Technical-Assessment-Appendix.md#b-provenance-audit-and-canadian-compliance-posture)). Non-blocking flags pre-fill but stay visually marked. The principle throughout: the system never resolves a legal ambiguity on the user's behalf, and never hides that one existed.
 
 ---
 
-The companion appendix carries what didn't belong in a response of this length: how I'd stage this under a compressed timeline with no infrastructure budget, the provenance and Canadian data-residency posture the government Proof of Value implies, the data model, and full implementations of the store and validators. I'd be glad to walk through any of it.
+The [companion appendix](Technical-Assessment-Appendix.md) carries what didn't belong in a response of this length: how I'd stage this under a compressed timeline with no infrastructure budget, the provenance and Canadian data-residency posture the government Proof of Value implies, the data model, and full implementations of the store and validators. I'd be glad to walk through any of it.

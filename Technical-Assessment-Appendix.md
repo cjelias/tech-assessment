@@ -2,13 +2,17 @@
 
 **Companion to the Technical Assessment Response. Optional reading; the main response stands alone.**
 
-This covers material your email indicated would come up in the final conversation — pivoting under resource constraints, and the schemas behind the design — plus the compliance posture the government Proof of Value work implies. Section references point back to the main document.
+This covers material your email indicated would come up in the final conversation — pivoting under resource constraints, and the schemas behind the design — plus the compliance posture the government Proof of Value work implies. Numbered sections (§0–§4) are in the main response, lettered ones (§A–§F) are here. Every reference is a link.
+
+---
+
+**Contents** — [Assumptions](#assumptions) · [A. Resource-Constrained Pivot Strategy](#a-resource-constrained-pivot-strategy) · [B. Provenance, Audit, and Compliance](#b-provenance-audit-and-canadian-compliance-posture) · [C. Data Model Sketch](#c-data-model-sketch) · [D. Store Implementation Notes](#d-store-implementation-notes) · [E. Validation Implementations](#e-validation-implementations) · [F. What Python 3.14 Changes](#f-what-python-314-actually-changes-here) · [Main response](Technical-Assessment-Response.md)
 
 ---
 
 ## Assumptions
 
-§0 of the main response lists the assumptions that apply to both documents; those still hold here. These are additional, and the first one is the largest — Section A is built on a scenario I invented, because your brief describes no constraints at all.
+[§0](Technical-Assessment-Response.md#0-assumptions) of the main response lists the assumptions that apply to both documents; those still hold here. These are additional, and the first one is the largest — [§A](#a-resource-constrained-pivot-strategy) is built on a scenario I invented, because your brief describes no constraints at all.
 
 | Area | Assumption | Note |
 |---|---|---|
@@ -20,12 +24,12 @@ This covers material your email indicated would come up in the final conversatio
 | B | Protected B is the plausible classification ceiling | Stated nowhere; if it's higher, self-hosting stops being optional |
 | B | Cloud hosting rather than on-premises | On-prem removes the residency question and substitutes an operations burden |
 | B | The privilege discussion is engineering-informed, not legal advice | Needs counsel and law-society confirmation before it drives contract terms |
-| B | A form is eventually exported or filed from the pre-filled draft | The §3 pipeline stops at pre-fill; the `relied_upon` event assumes a discrete downstream step. If there isn't one, that event becomes "user accepted the draft" and the argument is unchanged |
+| B | A form is eventually exported or filed from the pre-filled draft | The [§3](Technical-Assessment-Response.md#3-data-pipeline--error-handling) pipeline stops at pre-fill; the `relied_upon` event assumes a discrete downstream step. If there isn't one, that event becomes "user accepted the draft" and the argument is unchanged |
 | C | Multi-tenant, with user accounts (`org_id`, `created_by`) | Not stated; single-tenant would simplify the model |
 | C | Five tables is a sketch, not a complete model | Omits auth, the form registry, field mapping, and billing |
 | D | Next.js 16.1 App Router with server rendering | Hydration handling is unnecessary in a pure client-rendered SPA |
 | D | Autosave payloads stay under the 64 KB `keepalive` cap | A 5,000-word draft is roughly 30 KB, so it fits; the code guards the flag rather than assuming it |
-| E | Python 3.14, Pydantic v2, rapidfuzz; fuzzy threshold 90 | Dependency and tuning choices; §F covers what 3.14 changes |
+| E | Python 3.14, Pydantic v2, rapidfuzz; fuzzy threshold 90 | Dependency and tuning choices; [§F](#f-what-python-314-actually-changes-here) covers what 3.14 changes |
 | F | The extraction worker's dependency stack can be audited and pinned | Free-threading is only safe where you control every C extension |
 | E | `check_restoration` is illustrative | Claim construction is elided (`claims=[...]`) |
 
@@ -41,7 +45,7 @@ The architecture in the main response is the target state. Assume for this secti
 | No OCR/vision infrastructure | Send PDF/PNG directly to the LLM vendor's native multimodal document support | Higher per-call cost | Removes an entire pipeline stage; the extraction contract is unchanged |
 | No object storage | Store bytes in a `bytea` column in the existing Postgres, with a hard size cap, keyed by the same `fileId` | Bloats the database, no CDN | Migrating to S3/GCS touches only the storage adapter |
 | No time for cross-device sync | Ship the in-memory store alone; it fully fixes Defect 1. Server autosave lands as a fast-follow | Refresh loses the draft | `PATCH /cases/:id/draft` is additive; no schema change |
-| No time for full validation | Ship deterministic checks only (§4.4, first bullet) — presence, types, dates, the s.182 rule | No semantic or judge-based detection | The severity taxonomy and `DiscrepancyFlag` are already N-source; semantic checks append flags to the same structure |
+| No time for full validation | Ship deterministic checks only ([§4.4](Technical-Assessment-Response.md#44-methods-by-category), first bullet) — presence, types, dates, the s.182 rule | No semantic or judge-based detection | The severity taxonomy and `DiscrepancyFlag` are already N-source; semantic checks append flags to the same structure |
 
 That last row is the one I'd defend hardest. Deterministic checks are perhaps fifteen percent of the validation work and catch the errors with the worst consequences, because statutory deadlines are arithmetic. Shipping them alone is a defensible interim product; shipping the LLM judge alone would not be.
 
@@ -51,28 +55,28 @@ The underlying discipline is what made the ingestion rescues at FoodLogiQ and Sm
 
 ## B. Provenance, Audit, and Canadian Compliance Posture
 
-Provenance isn't an addition to this design — §4.2 attaches source, page, and verified quote to every extracted value for correctness reasons that have nothing to do with compliance. For a government Proof of Value, the same objects become the audit record with modest additions.
+Provenance isn't an addition to this design — [§4.2](Technical-Assessment-Response.md#42-one-schema-with-provenance-on-every-field) attaches source, page, and verified quote to every extracted value for correctness reasons that have nothing to do with compliance. For a government Proof of Value, the same objects become the audit record with modest additions.
 
-**Append-only, not latest-value-only.** An audit log is the easiest thing in a design like this to mistake for compliance scope creep, so it's worth naming what actually generates it. Three mechanisms already in the main response produce *different values for the same field over time*: §3 retries extraction after a validation failure, a second upload re-runs it against a larger corpus, and Section A above stages the extraction stack itself changing beneath live cases. The form a lawyer files is fixed at a moment; the extraction behind it isn't. Store only the current value and *"the form said 12 March when we filed and says 4 April now — which one was wrong?"* has no answer.
+**Append-only, not latest-value-only.** An audit log is the easiest thing in a design like this to mistake for compliance scope creep, so it's worth naming what actually generates it. Three mechanisms already in the main response produce *different values for the same field over time*: [§3](Technical-Assessment-Response.md#3-data-pipeline--error-handling) retries extraction after a validation failure, a second upload re-runs it against a larger corpus, and [§A](#a-resource-constrained-pivot-strategy) above stages the extraction stack itself changing beneath live cases. The form a lawyer files is fixed at a moment; the extraction behind it isn't. Store only the current value and *"the form said 12 March when we filed and says 4 April now — which one was wrong?"* has no answer.
 
-It is also the instrumentation whose absence let Defect 2 reach a user bug report. Nothing recorded what the model was actually given, so "the AI ignores my documents" stayed an anecdote rather than a diagnosable claim. §1.3 proposes logging the assembled prompt server-side during triage; this is the durable, per-case form of the same thing.
+It is also the instrumentation whose absence let Defect 2 reach a user bug report. Nothing recorded what the model was actually given, so "the AI ignores my documents" stayed an anecdote rather than a diagnosable claim. [§1.3](Technical-Assessment-Response.md#13-confirming-this-in-the-first-hour) proposes logging the assembled prompt server-side during triage; this is the durable, per-case form of the same thing.
 
-*What writes an event.* The `event_type` values in §C, in the order a case hits them:
+*What writes an event.* The `event_type` values in [§C](#c-data-model-sketch), in the order a case hits them:
 
 | Event | Trigger | Payload carries |
 |---|---|---|
 | `uploaded` | File accepted or rejected at validation | MIME type, size, rejection reason |
 | `extracted` | Extraction completes, per file per `model_id` | Assembled prompt and raw response |
-| `judged` | A semantic or judge-based check returns (§4.4) | Verdict and stated rationale |
-| `flagged` | The gate raises a discrepancy (§4.1) | The N competing claims, with provenance |
-| `resolved` | A human overrides a blocking flag (§4.6) | Resolver identity, chosen value |
+| `judged` | A semantic or judge-based check returns ([§4.4](Technical-Assessment-Response.md#44-methods-by-category)) | Verdict and stated rationale |
+| `flagged` | The gate raises a discrepancy ([§4.1](Technical-Assessment-Response.md#41-a-gate-not-a-report)) | The N competing claims, with provenance |
+| `resolved` | A human overrides a blocking flag ([§4.6](Technical-Assessment-Response.md#46-surfacing-discrepancies)) | Resolver identity, chosen value |
 | `relied_upon` | The form is exported or filed | Snapshot of every field as presented |
 
 The last row matters most and is the one usually missed. The other events describe what the system believed; `relied_upon` is the only record of what a person acted on, and it's where an audit starts.
 
 *Why not update in place.* `discrepancy_flags.resolved_by` holds the latest resolution only. A flag can be raised, resolved, re-raised when a later document arrives, then resolved differently — an `UPDATE` erases the first decision, which is precisely the one that gets asked about. Same argument for `extractions.is_current`: it preserves superseded values but not the prompt, model, and evidence that produced them.
 
-*What it costs.* Prompt/response payloads dominate the volume — that's what `compression.zstd` in §F is for — and it forces an explicit retention policy instead of an implicit keep-forever. Strip away the Proof of Value framing and the cheaper version is structured application logs at short retention: the debugging value survives, long-horizon per-case reconstruction doesn't. It partly pays for itself either way, since the `extracted` events are the labelled corpus the §4.4 regression harness needs.
+*What it costs.* Prompt/response payloads dominate the volume — that's what `compression.zstd` in [§F](#f-what-python-314-actually-changes-here) is for — and it forces an explicit retention policy instead of an implicit keep-forever. Strip away the Proof of Value framing and the cheaper version is structured application logs at short retention: the debugging value survives, long-horizon per-case reconstruction doesn't. It partly pays for itself either way, since the `extracted` events are the labelled corpus the [§4.4](Technical-Assessment-Response.md#44-methods-by-category) regression harness needs.
 
 **No opaque decisions.** Because extraction and validation are already schema-constrained with retry-on-malformed-output, raw prompt/response pairs are cheap to log and reviewable by a person without re-running the model. Combined with verified citations, every flag a reviewer sees can be traced to text in a specific file on a specific page.
 
@@ -81,9 +85,9 @@ The last row matters most and is the one usually missed. The other events descri
 - **Residency.** PIPEDA plus federal procurement expectations point at Canadian-region hosting (`ca-central-1` or Azure Canada Central) and, for anything at **Protected B**, alignment with the CCCS Medium cloud control profile. A public LLM API with unspecified processing geography is not a safe default. The options are a VPC-scoped endpoint with a signed no-training/no-retention agreement in a Canadian region, or a self-hosted model for the extraction step. This needs a decision before it becomes a blocker, not after the architecture assumes otherwise.
 - **Privilege.** Distinct from privacy and more specific to a legal product: transmitting solicitor-client privileged material to a third-party processor raises waiver and law-society confidentiality questions that residency alone doesn't answer. It shapes the contract terms and the retention posture, and it's worth having a defensible answer before a government reviewer asks.
 
-**Retention tied to the existing lifecycle.** The status model in §3 already provides the hook: `Ready` is the point extraction is trusted and retained on the case clock; `Failed` and abandoned uploads purge on a much shorter one. Least-privilege access scopes per `fileId`, the same reference used everywhere else.
+**Retention tied to the existing lifecycle.** The status model in [§3](Technical-Assessment-Response.md#3-data-pipeline--error-handling) already provides the hook: `Ready` is the point extraction is trusted and retained on the case clock; `Failed` and abandoned uploads purge on a much shorter one. Least-privilege access scopes per `fileId`, the same reference used everywhere else.
 
-None of this requires infrastructure beyond what §2–§4 already propose. It's the same objects logged rather than discarded, and the same status model given a retention policy rather than only a UI meaning.
+None of this requires infrastructure beyond what [§2](Technical-Assessment-Response.md#2-architectural-solution--state-management)–[§4](Technical-Assessment-Response.md#4-cross-reference-validation--anomaly-detection) already propose. It's the same objects logged rather than discarded, and the same status model given a retention policy rather than only a UI meaning.
 
 ---
 
@@ -204,7 +208,7 @@ useCaseDraftStore.subscribe(save);
 
 ## E. Validation Implementations
 
-**Citation verification.** The point made in §4.4: requiring a citation field catches an absent citation, not a fabricated one. Verification against the source text is what makes the guarantee real.
+**Citation verification.** The point made in [§4.4](Technical-Assessment-Response.md#44-methods-by-category): requiring a citation field catches an absent citation, not a fabricated one. Verification against the source text is what makes the guarantee real.
 
 ```python
 from pydantic import BaseModel, model_validator
@@ -285,15 +289,15 @@ The caveats are real and specific:
 - The gain is uneven across this pipeline. `pdfplumber` is largely pure Python and would benefit; Tesseract runs as a subprocess and wouldn't care either way; Pillow and NumPy sit somewhere in between depending on version.
 - Memory runs roughly 15–20% higher, since the free-threaded build uses mimalloc rather than pymalloc.
 
-So the honest recommendation is not "switch the backend." It's that the **extraction worker is the right candidate** — it's already an isolated queue consumer in §3 with a dependency stack small enough to audit and pin, which is exactly the profile the ecosystem guidance calls for. Benchmark it against the existing process pool, assert `sys._is_gil_enabled() is False` at worker startup so a silent GIL re-enable fails loudly instead of quietly halving throughput, and leave the API service on the default build where it would only pay the overhead. If it doesn't win, PEP 734 subinterpreters (`concurrent.interpreters`) are the other new option, with better isolation than threads and lower cost than processes.
+So the honest recommendation is not "switch the backend." It's that the **extraction worker is the right candidate** — it's already an isolated queue consumer in [§3](Technical-Assessment-Response.md#3-data-pipeline--error-handling) with a dependency stack small enough to audit and pin, which is exactly the profile the ecosystem guidance calls for. Benchmark it against the existing process pool, assert `sys._is_gil_enabled() is False` at worker startup so a silent GIL re-enable fails loudly instead of quietly halving throughput, and leave the API service on the default build where it would only pay the overhead. If it doesn't win, PEP 734 subinterpreters (`concurrent.interpreters`) are the other new option, with better isolation than threads and lower cost than processes.
 
 **Things that are straightforwardly better, no trade-off:**
 
 | Feature | Why it matters here |
 |---|---|
 | `uuid.uuid7()` native | The design keys everything on UUIDv7. In 3.12 that meant a third-party dependency; now it's stdlib, and the time-ordering gives better index locality on `cases` and `case_files` than random v4 |
-| t-strings (PEP 750) | Prompt assembly keeps document-derived text structurally separate from instructions rather than concatenated — see §3 of the main response |
-| PEP 768 debugger interface | Attach to a running extraction worker and inspect in-flight asyncio tasks without restarting it. Directly useful for the triage in §1.3, and for a stuck job in production |
+| t-strings (PEP 750) | Prompt assembly keeps document-derived text structurally separate from instructions rather than concatenated — see [§3](Technical-Assessment-Response.md#3-data-pipeline--error-handling) of the main response |
+| PEP 768 debugger interface | Attach to a running extraction worker and inspect in-flight asyncio tasks without restarting it. Directly useful for the triage in [§1.3](Technical-Assessment-Response.md#13-confirming-this-in-the-first-hour), and for a stuck job in production |
 | `compression.zstd` (PEP 784) | `extraction_events` stores raw prompt/response pairs and has to be retained for years. Compressing payloads with a stdlib codec, no new dependency, is a meaningful storage win on the audit log |
 | Deferred annotations (PEP 649) | Pydantic forward references resolve without `from __future__ import annotations`, and import cost drops — minor, but this codebase is schema-heavy |
 
