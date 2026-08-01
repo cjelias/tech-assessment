@@ -4,6 +4,27 @@
 
 ---
 
+## Table of Contents
+
+- [A note on hands-on coding, and how this response was built](#a-note-on-hands-on-coding-and-how-this-response-was-built)
+- [1. Root Cause Analysis (RCA)](#1-root-cause-analysis-rca)
+  - [1.1 Why the frontend "forgets" text and files on navigation](#11-why-the-frontend-forgets-text-and-files-on-navigation)
+  - [1.2 Why the AI is "blind" to PDFs/PNGs](#12-why-the-ai-is-blind-to-pdfspngs)
+- [2. Architectural Solution & State Management](#2-architectural-solution--state-management)
+  - [2.1 Lifting and persisting state](#21-lifting-and-persisting-state)
+  - [2.2 Handling binary file uploads across page transitions](#22-handling-binary-file-uploads-across-page-transitions)
+- [3. Data Pipeline & Error Handling](#3-data-pipeline--error-handling)
+  - [3.1 End-to-end pipeline](#31-end-to-end-pipeline)
+  - [3.2 UX indicators for the extraction lifecycle](#32-ux-indicators-for-the-extraction-lifecycle)
+- [4. Cross-Reference Validation & Anomaly Detection](#4-cross-reference-validation--anomaly-detection)
+  - [4.1 Design](#41-design)
+  - [4.2 Specific methods, by category](#42-specific-methods-by-category)
+  - [4.3 UX for flagged discrepancies](#43-ux-for-flagged-discrepancies)
+- [5. Resource-Constrained Pivot Strategy](#5-resource-constrained-pivot-strategy)
+- [6. Provenance, Audit, and Government Proof-of-Value Considerations](#6-provenance-audit-and-government-proof-of-value-considerations)
+
+---
+
 ### A note on hands-on coding, and how this response was built
 
 Across FoodLogiQ, Smile CDR, and O'Reilly, my day-to-day has been hands-on: writing and reviewing production code in the same systems I was architecting — ingestion pipelines, normalization layers, and the provenance/audit logic that had to hold up under compliance review, not just design review. Architecture decisions on those platforms weren't made from a whiteboard; they came out of shipping something and then fixing what broke in it. That's the lens this response is written from, which is why it leans on concrete code and schemas below (§2.1, §4.1) rather than diagrams alone.
