@@ -182,26 +182,43 @@ This single change fixes both defects simultaneously: state loss is solved becau
 ### 3.1 End-to-end pipeline
 
 ```mermaid
-flowchart LR
-    A["Upload\n(PDF / PNG)"] --> B["Validate\nmime type, size, virus scan"]
-    B --> C["Object Storage\n(S3 / GCS) + fileId"]
-    C --> D["Extraction Queue\n(BullMQ / Celery job)"]
-    D --> E{"File type?"}
-    E -- PDF --> F["Text-layer extraction\n(pdf-parse / pdfplumber)"]
-    F --> G{"Text layer\nsufficient?"}
-    G -- No / scanned --> H["OCR fallback\n(Tesseract / cloud OCR)"]
-    G -- Yes --> I["Normalized text\n+ page/source metadata"]
+flowchart TB
+    subgraph S1["1 · Ingest"]
+        direction LR
+        A["Upload\n(PDF / PNG)"] --> B["Validate\nmime type, size,\nvirus scan"]
+        B --> C["Object Storage\n(S3 / GCS) + fileId"]
+        C --> D["Extraction Queue\n(BullMQ / Celery job)"]
+    end
+
+    subgraph S2["2 · Extract"]
+        direction LR
+        E{"File\ntype?"}
+        E -- PDF --> F["Text-layer extraction\n(pdf-parse / pdfplumber)"]
+        F --> G{"Text layer\nsufficient?"}
+        G -- No / scanned --> H["OCR fallback\n(Tesseract / cloud OCR)"]
+        E -- PNG --> J["OCR or multimodal\nvision model pass"]
+    end
+
+    subgraph S3["3 · Normalize & Prompt"]
+        direction LR
+        I["Normalized text\n+ page/source metadata"] --> K["Prompt assembly:\nuser text + doc text"]
+        K --> L["LLM structured extraction\n(schema-constrained)"]
+        L --> M["Pydantic / JSON Schema\nvalidation"]
+    end
+
+    subgraph S4["4 · Persist & Map"]
+        direction LR
+        O["Persist structured result\nkeyed by caseId"] --> P["Application Forms page\nfetches by caseId"]
+        P --> Q["Field-mapping layer:\nextraction schema →\nform schema"]
+        Q --> R["Pre-filled form\n+ provenance per field"]
+    end
+
+    D --> E
+    G -- Yes --> I
     H --> I
-    E -- PNG --> J["OCR or multimodal\nvision model pass"]
     J --> I
-    I --> K["Prompt assembly:\nuser text + extracted doc text"]
-    K --> L["LLM structured extraction\n(schema-constrained / function calling)"]
-    L --> M["Pydantic / JSON Schema\nvalidation"]
     M -- fail --> N["Retry w/ backoff\nor flag for review"]
-    M -- pass --> O["Persist structured result\nkeyed by caseId"]
-    O --> P["Application Forms page\nfetches by caseId"]
-    P --> Q["Field-mapping layer:\nextraction schema → form schema"]
-    Q --> R["Pre-filled form\n+ provenance per field"]
+    M -- pass --> O
 ```
 
 Key design decisions embedded in this pipeline:
