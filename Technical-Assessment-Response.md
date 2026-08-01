@@ -1,373 +1,284 @@
 # Technical Assessment Response: Frontend State & AI Workflow Integration
 
-**Scenario:** Lextar AI Document Processing Workflow — Case Description → Application Forms
+**Lextar AI Document Processing Workflow — Case Description → Application Forms**
+Chris Elias · A companion appendix covers the pivot strategy, compliance posture, and schemas. This document stands alone.
 
 ---
 
-## Table of Contents
-
-- [A note on hands-on coding, and how this response was built](#a-note-on-hands-on-coding-and-how-this-response-was-built)
-- [1. Root Cause Analysis (RCA)](#1-root-cause-analysis-rca)
-  - [1.1 Why the frontend "forgets" text and files on navigation](#11-why-the-frontend-forgets-text-and-files-on-navigation)
-  - [1.2 Why the AI is "blind" to PDFs/PNGs](#12-why-the-ai-is-blind-to-pdfspngs)
-- [2. Architectural Solution & State Management](#2-architectural-solution--state-management)
-  - [2.1 Lifting and persisting state](#21-lifting-and-persisting-state)
-  - [2.2 Handling binary file uploads across page transitions](#22-handling-binary-file-uploads-across-page-transitions)
-- [3. Data Pipeline & Error Handling](#3-data-pipeline--error-handling)
-  - [3.1 End-to-end pipeline](#31-end-to-end-pipeline)
-  - [3.2 UX indicators for the extraction lifecycle](#32-ux-indicators-for-the-extraction-lifecycle)
-- [4. Cross-Reference Validation & Anomaly Detection](#4-cross-reference-validation--anomaly-detection)
-  - [4.1 Design](#41-design)
-  - [4.2 Specific methods, by category](#42-specific-methods-by-category)
-  - [4.3 UX for flagged discrepancies](#43-ux-for-flagged-discrepancies)
-- [5. Resource-Constrained Pivot Strategy](#5-resource-constrained-pivot-strategy)
-- [6. Provenance, Audit, and Government Proof-of-Value Considerations](#6-provenance-audit-and-government-proof-of-value-considerations)
+To close the two questions your note left open: my work at FoodLogiQ, Smile CDR, and O'Reilly has been hands-on throughout — writing and reviewing production code in the ingestion, normalization, and provenance layers I was also architecting, which is why this leans on schemas and code rather than diagrams alone. On availability, I'm looking for one substantial engagement, not a side project stacked behind other commitments. Rescue work needs someone reachable in your hours and in the codebase daily, and that's what I'd be signing up for. Per your encouragement on AI tooling, I used Claude Code to draft and diagram faster; the diagnosis and the trade-off calls are mine.
 
 ---
 
-### A note on hands-on coding, and how this response was built
+## 1. Root Cause Analysis
 
-Across FoodLogiQ, Smile CDR, and O'Reilly, my day-to-day has been hands-on: writing and reviewing production code in the same systems I was architecting — ingestion pipelines, normalization layers, and the provenance/audit logic that had to hold up under compliance review, not just design review. Architecture decisions on those platforms weren't made from a whiteboard; they came out of shipping something and then fixing what broke in it. That's the lens this response is written from, which is why it leans on concrete code and schemas below (§2.1, §4.1) rather than diagrams alone.
+### 1.1 Why the frontend forgets text and files on navigation
 
-In the interest of transparency, and per your own encouragement to use modern AI tooling: I used Claude Code to accelerate drafting and diagramming this response. The root-cause diagnosis, the architecture and trade-off calls, and the framing of what actually breaks in this scenario are mine, drawn from doing this kind of document-ingestion rescue work before — the tool moved faster, it didn't do the thinking.
+**Case Description** and **Application Forms** are two route-level components behind a client-side router, and the form values — textarea contents and the `FileList` from `<input type="file">` — live in local state (`useState`/`useReducer`) scoped to `CaseDescription` itself.
 
-Given that this role anchors upcoming government Proof of Value work, I've added a short section on the provenance/audit posture this design treats as non-negotiable (§6), and a section on how I'd pivot the architecture if infrastructure or timeline were suddenly constrained (§5), since I expect that kind of pivot to come up directly in our next conversation.
+A route change swaps the matched component, which **unmounts** the old tree: effect cleanups run, Fiber nodes are dropped, and nothing serializes anything. Navigating back mounts a **fresh instance** that re-runs its initial `useState` calls and gets defaults. The prior instance was garbage collected — nothing forgot the data so much as the object holding it ceased to exist.
 
----
+Files are more fragile than text. A `File` handle is an in-memory reference tied to that DOM node: not JSON-serializable, unable to survive a `sessionStorage` round-trip, and destroyed with the input element. A fix addressing only the text would leave attachments broken.
 
-## 1. Root Cause Analysis (RCA)
+Two variants to rule out in triage, because each changes the fix. If the tabs are conditional renders (`{active === 'case' && <CaseDescription/>}`) rather than routes, the unmount is identical but the fix may be as small as toggling visibility. And if the sidebar uses a plain `<a href>` rather than `<Link>`, that's a full document load, destroying in-memory state *and* any store with it — no state library helps until the link is fixed.
 
-### 1.1 Why the frontend "forgets" text and files on navigation
+**In one line:** state lives in a component that gets unmounted, and file handles are never lifted out of the DOM into anything durable before that happens.
 
-The most likely cause is that **Case Description** and **Application Forms** are two separate route-level components in the client-side router (e.g., two Next.js pages/route segments), and the form fields (`textarea`, `<input type="file">` selection) are held in **local component state** (`useState`/`useReducer`) scoped to the `CaseDescription` component itself.
+### 1.2 Why the AI is blind to the uploaded PDFs and PNGs
 
-In React, a route change that swaps out the matched component **unmounts** the old component tree. Unmounting destroys all local state and Fiber nodes — there is no automatic serialization or persistence step. When the user navigates back, the router mounts a **fresh instance** of `CaseDescription`, which re-runs its initial `useState`/`useReducer` calls and gets back default/empty values. Nothing "remembers" the previous instance; it was garbage collected.
+The screenshot in your brief does more diagnostic work than it appears to. The dropzone reads **"Drag & drop PDF or Word files"** and **"Supports PDF and DOCX. Typewritten text only."** The defect report has the user attaching `evidence.png`. **PNG is not an accepted type anywhere in that UI**, so before any pipeline stage runs, the `accept` attribute and the server-side MIME allowlist are prime suspects for the image never entering the system at all. "Typewritten text only" is a second admission: there is no OCR path, so a scanned PDF fails the same way.
 
-File uploads are actually more fragile than text: even if the text were persisted, a browser `File`/`FileList` object obtained from an `<input type="file">` is an **in-memory handle scoped to that DOM node**. It is not serializable to JSON, cannot survive `localStorage`/`sessionStorage` round-trips, and does not persist across a route/component swap because the input element itself is destroyed and recreated.
+| # | Layer | Failure mode | Assessment |
+|---|---|---|---|
+| 1 | File input | `accept` / MIME allowlist excludes `image/*`; PNG rejected at selection | **Most likely** — stated in the UI |
+| 2 | Request assembly | File captured in state, but only the text field is appended to the request | Possible |
+| 3 | Payload encoding | Body sent as `application/json`, not `multipart/form-data`; binaries dropped | Possible |
+| 4 | API endpoint | Handler reads `req.body.prompt` only; no `multer`/`busboy` configured | Possible |
+| 5 | Parser | Text layer extracted, scanned pages skipped, no OCR fallback; PNG never routed to OCR or a vision model | **Most likely** |
+| 6 | Prompt assembly | Extraction computed but never interpolated into the final prompt | **Most likely** — matches the symptom exactly |
+| 7 | Context budget | Document text truncated to fit the window while the typed prompt survives | **Most likely** — see below |
+| 8 | Persistence | Extraction held in process memory; a second replica serves Application Forms nothing | Likely at any real scale |
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant R as Router
-    participant CD as CaseDescription (mounted #1)
-    participant CD2 as CaseDescription (mounted #2)
-    participant AF as ApplicationForms
+**The asymmetric token budget (#7) is a root cause, not a caveat.** The word counter reads `0 / 5,000` and meters *only* the typed text — uploaded files are not counted against it. So the product caps its smallest input at roughly 6,700 tokens while the genuinely large one, a multi-page contract at 15–20k tokens or more, has no cap anywhere. If prompt assembly reserves the user's text and truncates document content to fit, the observable result is exactly what your report describes: *the AI focuses on the typed text prompts* and appears blind to the documents. That also means document text cannot simply be concatenated into a prompt — the pipeline needs an explicit token budget with retrieval over chunked content (§3).
 
-    U->>CD: Types prompt, attaches PDF + PNG
-    Note over CD: local useState holds text + File objects
-    U->>R: Clicks "Application Forms"
-    R->>CD: Unmount
-    Note over CD: Fiber tree destroyed,<br/>local state + File refs garbage collected
-    R->>AF: Mount ApplicationForms
-    U->>R: Clicks back / sidebar link
-    R->>CD2: Mount CaseDescription (fresh instance)
-    Note over CD2: useState re-initializes to defaults
-    CD2-->>U: Blank textarea, no files
-```
+**On #8:** the intended workflow states the backend "saves the structured extraction in memory." Behind a load balancer with more than one replica, or on a serverless runtime, the Application Forms request can land on an instance that never performed the extraction — reproducing the second half of Defect 2 even when extraction worked perfectly.
 
-**Root cause in one line:** state lives in a component that gets unmounted, and file handles are never lifted out of the DOM/component into anything durable before that unmount happens.
+### 1.3 Confirming this in the first hour
 
-### 1.2 Why the AI is "blind" to PDFs/PNGs
-
-Because there are four independent layers involved, "blindness" can originate at any of them — and in practice it is usually more than one:
-
-```mermaid
-flowchart TB
-    subgraph R1[" "]
-        direction LR
-        A["Frontend: file input\n+ textarea"] -.->|Failure point 1| A1["File onChange captured in state,\nbut never appended to the outgoing request\n(only text field is sent)"]
-    end
-    subgraph R2[" "]
-        direction LR
-        B["Request payload\nconstruction"] -.->|Failure point 2| B1["Body sent as application/json\ninstead of multipart/form-data —\nbinary files silently dropped or\nnever reach the server"]
-    end
-    subgraph R3[" "]
-        direction LR
-        C["API endpoint /\nbackend router"] -.->|Failure point 3| C1["Endpoint reads req.body.prompt only;\nno multer/formidable/busboy middleware\nconfigured to parse the files array"]
-    end
-    subgraph R4[" "]
-        direction LR
-        D["Backend parser: PDF\ntext extraction / OCR"] -.->|Failure point 4| D1["PDF text layer extracted but\nscanned/image-based pages skipped\n(no OCR fallback); PNG never\nrouted through OCR or a vision model"]
-    end
-    subgraph R5[" "]
-        direction LR
-        E["Prompt assembly"] -.->|Failure point 5| E1["Extraction result computed but\nnever interpolated into the final\nLLM prompt string — classic\n'computed but not used' bug"]
-    end
-    subgraph R6[" "]
-        direction LR
-        F["LLM call"] -.->|Failure point 6| F1["Text-only model selected for a\nmultimodal input, or extracted\ntext exceeds context window\nand gets silently truncated"]
-    end
-
-    A --> B --> C --> D --> E --> F --> G["Structured extraction result"]
-
-    style A1 fill:#fbeaea,stroke:#c0392b,color:#111
-    style B1 fill:#fbeaea,stroke:#c0392b,color:#111
-    style C1 fill:#fbeaea,stroke:#c0392b,color:#111
-    style D1 fill:#fbeaea,stroke:#c0392b,color:#111
-    style E1 fill:#fbeaea,stroke:#c0392b,color:#111
-    style F1 fill:#fbeaea,stroke:#c0392b,color:#111
-```
-
-Given the screenshot in the report shows an "Upload Documents" dropzone that says **"Supports PDF and DOCX. Typewritten text only"** — this is a strong hint the actual bug is a combination of **Failure point 4** (no OCR/vision fallback — the system explicitly disclaims scanned/handwritten content) and **Failure point 5** (extracted text is computed server-side but the prompt-assembly step that merges it with the user's typed prompt is broken or missing), which matches Defect 2's description of the AI "focusing on the typed text prompts" as if the document extraction never happened.
+Before writing code: check whether the upload request's `Content-Type` is `multipart/form-data` and a file part is actually present; test the input's `accept` attribute against a `.png`; log the fully assembled prompt server-side and look for extracted document text in it; and confirm the extraction survives a backend restart. That sequence separates failures 1–4 from 5–8 in about twenty minutes, and it decides which fix ships first.
 
 ---
 
 ## 2. Architectural Solution & State Management
 
-### 2.1 Lifting and persisting state
+### 2.1 The selection criterion: what each layer must survive
 
-The fix is to stop treating `CaseDescription`'s form state as local, and instead treat the **case** as a durable entity that outlives any single component's mount lifecycle. Three complementary layers:
+Tool choice falls out of durability requirements rather than preference:
 
-| Layer | Tool | Role |
+| Must survive | Requires | Relevant to |
 |---|---|---|
-| In-memory global store | **Zustand** | Single source of truth for the active case draft, shared by both pages without prop drilling |
-| Client-side durability | `zustand/middleware` **persist**, backed by `sessionStorage` | Survives route swaps and accidental refresh within the tab session |
-| Server-side durability | Debounced autosave to backend (`PATCH /cases/:id/draft`) | Source of truth across devices/tabs/sessions; the real fix for large payloads |
+| Component unmount on navigation | Any store instantiated **above** the router | Defect 1, directly |
+| Tab refresh | Serialization to `sessionStorage` / `localStorage` / IndexedDB | Accidental reload |
+| A second tab | Rules out `sessionStorage`, which is per-tab | Multi-tab review |
+| Device or session change | Server-side persistence keyed by `caseId` | The real durability answer |
 
-**Why Zustand over the alternatives:**
-- **Redux/Redux Toolkit** is a reasonable choice too (and preferable if the org already standardizes on it for devtools/middleware consistency across a larger app), but it's more boilerplate than this problem needs — a single "current case draft" slice doesn't need action creators, reducers, and a store setup for what is fundamentally one object.
-- **Context API alone** is not a solution here — Context doesn't persist anything either; it only solves prop-drilling. Using Context without a store still loses state on unmount unless the Provider lives above the routes that unmount (which is possible, but Zustand gives the same "lives above the router" placement plus built-in persistence middleware and selector-based re-render control for free).
-- **Raw Browser Storage (`localStorage`/`sessionStorage`) alone**, without a store, works for small string fields but has no reactivity model, a ~5–10MB quota (too small for attached PDFs), and no structured update API — you'd end up hand-rolling what Zustand's persist middleware already does.
+The reported defect only requires tier one. An in-memory store above the router fixes it outright; everything below is hardening.
 
-The key architectural move is **placing the store provider above the router boundary** (e.g., in `_app.tsx` / the root layout) so the store instance itself is never unmounted when the route changes — only the page components that *read* from it are.
+### 2.2 Tools considered, and why
 
-```typescript
-// stores/useCaseDraftStore.ts — module-level singleton, instantiated once above the router
-import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
+**Zustand** for the client draft, **TanStack Query** for server state, Postgres as the source of truth.
 
-interface UploadedFileRef {
-  fileId: string;
-  filename: string;
-  mimeType: string;
-  sizeBytes: number;
-  status: 'uploading' | 'uploaded' | 'extracting' | 'ready' | 'failed';
-}
+- **Zustand (selected).** A module-level store created outside the component tree, so a route change structurally cannot unmount it. Selector subscriptions mean `useCaseDraftStore((s) => s.promptText)` re-renders only what reads that slice — which matters for a textarea firing on every keystroke. `persist` middleware supplies tier two without hand-rolled serialization.
+- **Redux Toolkit + `redux-persist`.** The right call if the org already standardizes on Redux, where devtools and time-travel debugging genuinely help during a rescue. For a single case-draft object it's more ceremony than the problem needs, so I'd adopt it for codebase consistency, not on merits here.
+- **Context API.** Solves placement and prop-drilling, honestly half the problem — a Provider above the routes does survive the unmount. It lacks serialization, persistence, and selector granularity: every consumer re-renders on any change, the wrong default for per-keystroke updates. Context plus `useReducer` plus a hand-written storage sync converges on what Zustand already ships.
+- **Browser storage is three tools, not one.** `sessionStorage` (~5MB, per-tab, cleared on close) suits a draft that shouldn't outlive the session. `localStorage` (~5–10MB, shared across tabs) writes client PII to disk indefinitely — wrong posture for case data. IndexedDB is the only tier large and async enough to buffer file bytes. None has a reactivity model, so none replaces a store.
+- **TanStack Query** is complementary, not competing: it owns the server cache — autosave mutations, status polling, refetch on focus — while Zustand owns the local draft. That boundary avoids duplicating server data into a client store and then fighting to keep it fresh.
+- Not selected: URL/search-param state (unbounded prompt text doesn't belong in a URL) and Jotai/Valtio (fine, no advantage here).
 
-interface CaseDraftState {
-  caseId: string | null;
-  promptText: string;
-  analysisRole: 'legal_analyst' | 'counsel_applicant' | 'counsel_respondent' | 'adjudicator';
-  files: UploadedFileRef[];
-  setPromptText: (text: string) => void;
-  addFile: (file: UploadedFileRef) => void;
-  updateFileStatus: (fileId: string, status: UploadedFileRef['status']) => void;
-}
+### 2.3 Store placement and shape
 
-export const useCaseDraftStore = create<CaseDraftState>()(
-  persist(
-    (set) => ({
-      caseId: null,
-      promptText: '',
-      analysisRole: 'legal_analyst',
-      files: [],
-      setPromptText: (text) => set({ promptText: text }),
-      addFile: (file) => set((s) => ({ files: [...s.files, file] })),
-      updateFileStatus: (fileId, status) =>
-        set((s) => ({
-          files: s.files.map((f) => (f.fileId === fileId ? { ...f, status } : f)),
-        })),
-    }),
-    {
-      name: 'lextar-case-draft',
-      storage: createJSONStorage(() => sessionStorage),
-      // File objects never enter this store to begin with (see §2.2) — only
-      // JSON-safe refs — so a plain persist() is enough; no custom serializer needed.
-    }
-  )
-);
-```
-
-Both `CaseDescription` and `ApplicationForms` import the same `useCaseDraftStore` hook and select only the slices they need (e.g., `useCaseDraftStore((s) => s.promptText)`), so a keystroke on one page doesn't re-render the other page even though they share state.
+The load-bearing move is placing the store **above the router boundary** — `_app.tsx`, or the root `layout.tsx` under the App Router, where layouts persist across route-segment changes while page segments unmount.
 
 ```mermaid
 flowchart TB
-    subgraph Root["App Shell (never unmounts)"]
-        Store["Zustand store: useCaseDraftStore\n(persist → sessionStorage)"]
+    subgraph Root["App shell / root layout — never unmounts"]
+        Store["useCaseDraftStore<br/>(Zustand + persist)"]
     end
-    subgraph Router["Client-side Router"]
+    subgraph Router["Client-side router — segments unmount freely"]
         CD["/case-description"]
         AF["/application-forms"]
     end
     Store --> CD
     Store --> AF
-    CD -- "reads/writes prompt text,\nanalysis role, file refs" --> Store
-    AF -- "reads extracted/mapped\nfields, pre-fills form" --> Store
-    Store -- "debounced autosave" --> API[(Backend: PATCH /cases/:id/draft)]
-    API --> DB[(Case DB)]
+    CD -- "writes prompt text, role, file refs" --> Store
+    AF -- "reads mapped fields, pre-fills form" --> Store
+    Store -- "debounced autosave" --> API[("PATCH /cases/:id/draft")]
+    API --> DB[("Case DB")]
 ```
 
-### 2.2 Handling binary file uploads across page transitions
+```typescript
+// stores/useCaseDraftStore.ts — module singleton, created above the router
+type FileStatus = 'uploading' | 'uploaded' | 'queued'
+                | 'extracting' | 'analyzing' | 'ready' | 'failed';
 
-`File` objects cannot be persisted in `sessionStorage`/`localStorage` (not JSON-serializable, size-prohibitive). The correct pattern is to **not keep the file itself in frontend state at all** past the moment of selection:
+export const useCaseDraftStore = create<CaseDraftState>()(
+  persist(
+    (set, get) => ({
+      caseId: null, promptText: '', analysisRole: 'legal_analyst',
+      files: [] as UploadedFileRef[],   // { fileId, filename, mimeType, sizeBytes, status }
 
-1. On file selection, immediately stream the file to the backend via a dedicated `POST /cases/:id/files` (or a presigned S3/GCS upload URL) — don't wait for the user to submit the whole form.
-2. The backend stores the raw bytes in object storage and returns a lightweight, **serializable** reference: `{ fileId, filename, mimeType, sizeBytes, status: "uploaded" }`.
-3. Only this reference object goes into the Zustand store (and therefore into `sessionStorage`/the autosave payload) — small, JSON-safe, and independent of the browser's in-memory `File` handle.
-4. The **Application Forms** page never needs the actual bytes; it only needs the `fileId`s to look up processing status/results from the backend.
-5. For resilience against a page refresh mid-upload, an `IndexedDB`-backed queue (e.g., via `idb-keyval`) can hold not-yet-uploaded files locally so an interrupted upload can resume — this is optional hardening, not required for the core bug fix.
+      // Mint the id client-side (UUIDv7) so a file can be attached before any
+      // round-trip; the first server write upserts, making retries idempotent.
+      ensureCaseId: () => get().caseId ?? (set({ caseId: uuidv7() }), get().caseId!),
 
-This single change fixes both defects simultaneously: state loss is solved because nothing large or unserializable lives in component state, and "AI blindness" is mitigated because files are pushed to the backend (and can start processing) the moment they're selected, decoupled from whatever the user does on the frontend afterward.
+      setPromptText: (t) => set({ promptText: t }),
+      setAnalysisRole: (r) => set({ analysisRole: r }),
+      addFile: (f) => set((s) => ({ files: [...s.files, f] })),
+      removeFile: (id) => set((s) => ({ files: s.files.filter((f) => f.fileId !== id) })),
+      setFileStatus: (id, status) =>
+        set((s) => ({ files: s.files.map((f) => f.fileId === id ? { ...f, status } : f) })),
+      reset: () => set({ caseId: null, promptText: '', files: [] }),
+    }),
+    {
+      name: 'lextar-case-draft',
+      storage: createJSONStorage(() => sessionStorage),
+      // Next.js: sessionStorage is absent server-side and rehydrating during
+      // render causes a hydration mismatch — rehydrate from an effect instead.
+      skipHydration: true,
+      // promptText is deliberately NOT written to the browser: per your own
+      // placeholder it carries client names and permit details. It lives in
+      // memory (all Defect 1 requires) and is autosaved server-side.
+      partialize: (s) => ({ caseId: s.caseId, analysisRole: s.analysisRole, files: s.files }),
+    }
+  )
+);
+```
+
+`analysisRole` mirrors the four roles in your UI, since the selected role changes how extracted data should be framed and belongs in the same durable draft.
+
+### 2.4 Binary uploads across page transitions
+
+`File` objects should never enter frontend state past the moment of selection. On selection, stream immediately to `POST /cases/:id/files` (or a presigned S3/GCS URL) rather than waiting for form submission. The backend persists the bytes and returns a **serializable** reference — `{ fileId, filename, mimeType, sizeBytes, status }` — and only that reference enters the store: small, JSON-safe, independent of the browser's in-memory handle. Application Forms never needs the bytes; it resolves `fileId`s against the backend for status and results. For resilience mid-upload, an IndexedDB queue (`idb-keyval`) can hold not-yet-uploaded bytes so an interrupted upload resumes — hardening, not required for the core fix.
+
+This addresses both defects at once: nothing large or unserializable sits in component state, and files begin processing the moment they're selected, decoupled from whatever the user does next.
 
 ---
 
 ## 3. Data Pipeline & Error Handling
 
-### 3.1 End-to-end pipeline
-
 ```mermaid
 flowchart TB
     subgraph S1["1 · Ingest"]
         direction LR
-        A["Upload\n(PDF / PNG)"] --> B["Validate\nmime type, size,\nvirus scan"]
-        B --> C["Object Storage\n(S3 / GCS) + fileId"]
-        C --> D["Extraction Queue\n(BullMQ / Celery job)"]
+        A["Upload<br/>PDF / DOCX / PNG"] --> B["Validate<br/>MIME, size, virus scan"]
+        B --> C["Object storage<br/>+ fileId"]
+        C --> D["Extraction queue<br/>(BullMQ / Celery)"]
     end
-
     subgraph S2["2 · Extract"]
         direction LR
-        E{"File\ntype?"}
-        E -- PDF --> F["Text-layer extraction\n(pdf-parse / pdfplumber)"]
-        F --> G{"Text layer\nsufficient?"}
-        G -- No / scanned --> H["OCR fallback\n(Tesseract / cloud OCR)"]
-        E -- PNG --> J["OCR or multimodal\nvision model pass"]
+        E{"Type?"}
+        E -- PDF --> F["Text layer<br/>(pdfplumber)"]
+        F --> G{"Layer<br/>sufficient?"}
+        G -- "No / scanned" --> H["OCR fallback<br/>(Tesseract / cloud)"]
+        E -- DOCX --> I2["Native text<br/>(python-docx)"]
+        E -- PNG --> J["OCR or vision model"]
     end
-
-    subgraph S3["3 · Normalize & Prompt"]
+    subgraph S3["3 · Budget & Prompt"]
         direction LR
-        I["Normalized text\n+ page/source metadata"] --> K["Prompt assembly:\nuser text + doc text"]
-        K --> L["LLM structured extraction\n(schema-constrained)"]
-        L --> M["Pydantic / JSON Schema\nvalidation"]
+        I["Normalized text<br/>+ page / source metadata"] --> CH["Chunk + embed<br/>→ vector index"]
+        CH --> TB["Token budget: reserve<br/>typed prompt, retrieve<br/>top-k document spans"]
+        TB --> L["Schema-constrained<br/>LLM extraction"]
+        L --> M["Pydantic validation"]
     end
-
-    subgraph S4["4 · Persist & Map"]
+    subgraph S4["4 · Validate, Persist, Map"]
         direction LR
-        O["Persist structured result\nkeyed by caseId"] --> P["Application Forms page\nfetches by caseId"]
-        P --> Q["Field-mapping layer:\nextraction schema →\nform schema"]
-        Q --> R["Pre-filled form\n+ provenance per field"]
+        V["Cross-reference gate<br/>(§4)"] --> O["Persist result + events<br/>keyed by caseId"]
+        O --> P["Application Forms<br/>fetches by caseId"]
+        P --> Q["Field mapping →<br/>pre-filled form<br/>+ per-field provenance"]
     end
-
     D --> E
     G -- Yes --> I
     H --> I
+    I2 --> I
     J --> I
-    M -- fail --> N["Retry w/ backoff\nor flag for review"]
-    M -- pass --> O
+    M -- fail --> N["Retry with backoff,<br/>then flag for review"]
+    N --> L
+    M -- pass --> V
 ```
 
-Key design decisions embedded in this pipeline:
-- **Async job queue, not a synchronous request/response.** OCR and LLM calls can take seconds to minutes; the upload endpoint should return immediately with a `jobId`/`fileId` and status, not block the HTTP request.
-- **Server as source of truth, keyed by `caseId`.** The Application Forms page doesn't depend on anything the Case Description component held in memory — it independently fetches the latest extraction result for the case. This is what makes the pipeline robust to navigation, refresh, and even a different browser tab/device.
-- **Schema-constrained LLM output** (Pydantic models on the backend, or a JSON Schema passed via function calling/tool use) instead of free-form text parsing, so malformed output is caught immediately rather than silently corrupting form fields.
+Four decisions carry this. **Extraction is asynchronous** — OCR and LLM calls take seconds to minutes, so the upload endpoint returns a `fileId` and status immediately rather than blocking. **The server is the source of truth, keyed by `caseId`**, making Application Forms independent of anything a component held in memory and fixing failure #8. **The token budget is explicit**: the typed prompt gets a fixed reservation and document content is retrieved rather than concatenated, so growth in document size degrades retrieval quality instead of silently discarding evidence. **LLM output is schema-constrained** through function calling with Pydantic validation, so malformed output is caught rather than quietly corrupting form fields.
 
-### 3.2 UX indicators for the extraction lifecycle
-
-A user should never wonder "did it see my file?" A per-file, per-case status model surfaced as a stepper/badge solves this:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Uploading
-    Uploading --> Uploaded
-    Uploaded --> Queued
-    Queued --> Extracting
-    Extracting --> Analyzing: text/OCR ready
-    Analyzing --> Ready: LLM structuring succeeds
-    Analyzing --> Failed: LLM/validation error
-    Extracting --> Failed: parse/OCR error
-    Failed --> Queued: user retries
-    Ready --> [*]
-```
-
-Concretely: a status badge per attached file (`Uploading → Extracting → Analyzing → Ready/Failed`), a case-level progress indicator visible on both pages (since it's driven by the shared store + backend polling/SSE, not local state), toast notifications on completion/failure, and on the Application Forms page each pre-filled field is visually marked (e.g., a subtle highlight + "AI-filled from contract.pdf, p.3" tooltip) so the user can trace *why* a field has the value it does, and easily distinguish AI-filled vs. manually-edited fields.
+**Lifecycle visibility.** A user should never wonder whether the system saw their file. Each file carries a status rendered as a badge — `Uploading → Uploaded → Queued → Extracting → Analyzing → Ready`, with `Failed` reachable from any stage and retry returning it to `Queued`. Because status comes from the shared store plus polling or SSE rather than local state, the same case-level indicator appears on **both** pages. Rejected file types raise an explicit error at selection instead of silent omission — that alone would have surfaced Defect 2 months earlier — completion and failure raise toasts, and every pre-filled field is marked with its origin ("AI-filled from contract.pdf, p.3") so AI-filled and hand-edited values stay distinguishable.
 
 ---
 
 ## 4. Cross-Reference Validation & Anomaly Detection
 
-### 4.1 Design
+### 4.1 A gate, not a report
 
-Treat both inputs as **structured, comparable objects** rather than raw text, then diff them programmatically before anything reaches the form:
-
-1. Run the user's typed prompt through the same structured-extraction step as the documents (a lightweight LLM call constrained to the same Pydantic/JSON schema — e.g., `client_name`, `filing_date`, `permit_expiry_date`, `jurisdiction`, etc.).
-2. Run the document extraction through the identical schema.
-3. Now both sides are typed, field-aligned objects — comparable **without** re-parsing free text every time.
-
-```python
-# schemas/case_fields.py — the one schema both extraction paths target
-from pydantic import BaseModel, Field
-from datetime import date
-from typing import Literal
-
-class CaseFieldsV1(BaseModel):
-    client_name: str | None = None
-    jurisdiction: str | None = None
-    filing_date: date | None = None
-    permit_expiry_date: date | None = None
-    case_type: Literal["restoration_of_status", "extension", "appeal", "other"] | None = None
-    confidence: float = Field(ge=0, le=1, default=1.0)
-    source_span: str | None = None  # verbatim quote / page ref this field came from
-
-class DiscrepancyFlag(BaseModel):
-    field: str
-    prompt_value: str | None
-    document_value: str | None
-    severity: Literal["contradiction", "missing_field", "low_confidence"]
-    source_citation: str  # required, not optional — forces the judge model to ground every flag
-```
-
-`source_citation` being non-optional on `DiscrepancyFlag` is the load-bearing detail: Pydantic rejects any judge-model response that flags a conflict without pointing to where it came from, so an ungrounded hallucination fails validation instead of reaching the UI.
+Validating that the Case Description text lines up with the uploaded files is a **blocking step before pre-fill**, not a report produced alongside it. Both inputs run through the *same* schema so they become typed, field-aligned objects, then get compared programmatically before anything reaches a form field.
 
 ```mermaid
-flowchart TD
-    A["User's typed prompt"] --> B["LLM extraction\n(schema: CaseFieldsV1)"]
-    C["Uploaded PDF/PNG"] --> D["Document extraction pipeline\n(schema: CaseFieldsV1)"]
-    B --> E["Structured Prompt Claims\n(Pydantic object)"]
-    D --> F["Structured Document Data\n(Pydantic object)"]
-    E --> G["Comparator"]
-    F --> G
-    G --> H["Deterministic checks:\nrequired-field presence,\ntype/format/date validation"]
-    G --> I["Semantic checks:\nembedding similarity +\nNLI entailment/contradiction\non free-text fields"]
-    G --> J["LLM-as-judge pass:\ngiven both objects + raw source text,\nreturn contradictions with\ncited source spans (schema-validated)"]
-    H --> K["Discrepancy Report\n(missing / conflicting / low-confidence)"]
-    I --> K
-    J --> K
-    K --> L["Application Forms page:\ninline flags per field,\nblock silent auto-fill on conflict"]
+flowchart LR
+    A["Typed prompt"] --> G
+    C["Documents 1..N"] --> G
+    G["Same schema →<br/>comparator (N sources)"] --> H["Deterministic →<br/>semantic →<br/>grounded judge"]
+    H --> L{"Blocking<br/>flags?"}
+    L -- Yes --> M["Hold pre-fill,<br/>require resolution"]
+    L -- No --> N["Pre-fill with<br/>per-field provenance"]
 ```
 
-### 4.2 Specific methods, by category
+### 4.2 Provenance per field, not per document
 
-- **Programmatic / deterministic (cheap, run first):** Pydantic/JSON Schema validation to catch missing required fields outright; type and format normalization (e.g., all dates parsed to ISO-8601 before comparison) so `"45 days ago"` in the prompt can be resolved against an explicit `expiry_date` in the PDF; direct equality or fuzzy string matching (Levenshtein/token-set ratio) for short structured fields (names, IDs, case numbers).
-- **Semantic comparison (for free-text/narrative fields):** embedding similarity (cosine distance between sentence embeddings) as a cheap first-pass "these two statements are probably about the same thing" filter, followed by a **Natural Language Inference (NLI)** classifier (entailment / contradiction / neutral) — NLI is the right tool specifically for *contradiction* detection, whereas embedding similarity alone only tells you topical relatedness, not whether two statements disagree.
-- **AI prompting strategy — grounded LLM-as-judge:** a dedicated verifier prompt (separate call from the extraction call, to avoid the same failure mode marking its own work) that receives both structured objects plus the original source text/pages, and is required to return a strict, Pydantic-validated JSON list of `{field, prompt_value, document_value, severity, source_citation}`. Requiring a **source citation** (a quote or page reference) for every flagged item is the key defensive step — it forces the model to ground its claim in actual text rather than hallucinating a conflict, and gives the reviewing user something to verify against.
-- **On "Cross-Attention" specifically:** true cross-attention weight inspection is a model-internals interpretability technique, useful if you're fine-tuning a custom encoder over prompt+document pairs, but it isn't something you get access to (or need) when calling a hosted LLM API. For a production system, the pragmatic equivalent is the LLM-as-judge pass above — it's functionally "let the model attend across both sources," just done via prompting rather than internal attention weights, and it's inspectable/auditable, unlike raw attention maps.
-- **Guardrails:** wrap the verifier call with schema-enforcing libraries (e.g., Instructor, Guardrails AI, or plain Pydantic `model_validate` with retry-on-failure) so a malformed judge response triggers an automatic retry rather than corrupting the discrepancy report.
+One confidence score for an entire extraction cannot support per-field flags or a per-field "where did this come from" tooltip. Provenance attaches to each value:
 
-### 4.3 UX for flagged discrepancies
+```python
+class Provenance(BaseModel):
+    source: str                  # "prompt" | fileId
+    page: int | None = None
+    quote: str                   # verbatim span, verified to exist in that source
 
-Severity-tiered flags (`contradiction` / `missing_field` / `low_confidence`) rendered inline next to the relevant Application Forms field, each showing both conflicting values and their source (prompt vs. `contract.pdf p.3`). Hard contradictions block auto-fill of that specific field (leave it blank with a warning rather than silently picking one source) and require explicit user resolution; missing-field flags simply prompt the user to fill the gap manually.
+class Extracted[T](BaseModel):
+    value: T | None = None
+    confidence: float = Field(ge=0, le=1)   # no default; the model must commit
+    provenance: Provenance | None = None
+
+class CaseFieldsV1(BaseModel):
+    client_name:        Extracted[str]
+    jurisdiction:       Extracted[str]
+    status_expiry_date: Extracted[date]
+    refusal_date:       Extracted[date]     # shifts the s.182 clock start
+    case_type:          Extracted[Literal["restoration", "extension", "appeal", "other"]]
+```
+
+### 4.3 Severity, including asymmetry
+
+Because uploaded files aren't counted against the 5,000-word limit, the realistic input is a short description alongside a large document set. The two sides are rarely symmetric, so most misalignment is **not** a head-on contradiction, and a taxonomy built only around contradictions misses the dangerous cases:
+
+| Severity | Meaning | Blocks pre-fill |
+|---|---|---|
+| `contradiction` | Both sides state a value and they disagree | Yes |
+| `unsupported_claim` | The prompt asserts something no document corroborates | Yes, for material fields |
+| `document_only` | A document holds a material fact the prompt never mentions | Yes — flag prominently |
+| `missing_field` | Required by the target form, absent from every source | No; prompt for manual entry |
+| `low_confidence` | Extracted, but below threshold | No; mark for review |
+
+```python
+class DiscrepancyFlag(BaseModel):
+    field: str
+    severity: Literal["contradiction", "unsupported_claim",
+                      "document_only", "missing_field", "low_confidence"]
+    claims: list[Claim]          # {source, value, provenance} — N sources
+    blocks_prefill: bool
+```
+
+Modelling a flag as a list of claims rather than a `prompt_value`/`document_value` pair is what lets one comparator also handle **document-versus-document** conflicts: two uploaded permits with different expiry dates yield a single flag with two claims and no prompt claim at all.
+
+**A worked example from your own placeholder text.** It reads *"My client's study permit expired 45 days ago… restoration of status under IRPR s.182."* Section 182(1) allows 90 calendar days to apply, and the Federal Court has held that officers have no discretion to extend it. So if the prompt says 45 days but the uploaded permit shows 120, that's a `contradiction` that changes eligibility — caught deterministically from two dates, with no model involved. The subtler case is `document_only`: the client uploads an IRCC refusal letter they never mentioned, which moves the clock start from the expiry date to the day after the refusal. Nothing contradicts anything; they simply didn't mention the document that moved the deadline. A comparator looking only for contradictions ships an out-of-time filing. (Implementation in Appendix E.)
+
+### 4.4 Methods, by category
+
+- **Deterministic first, because it's cheap and certain.** Pydantic/JSON Schema validation for required-field presence and type conformance; normalizing dates to ISO-8601 before comparison so "45 days ago" resolves against an explicit date in the PDF; fuzzy matching (Levenshtein / token-set ratio) for names and case numbers where OCR noise is expected; and codified statutory rules like the one above. Anything answerable this way should never reach a model.
+- **Semantic comparison for narrative fields.** Embedding cosine similarity as a cheap first pass to find which statements are *about* the same thing, then a **Natural Language Inference** classifier over those pairs for entailment / contradiction / neutral. The ordering matters: similarity tells you two statements are topically related, never that they disagree. NLI is built for contradiction specifically.
+- **A grounded LLM judge, verified.** A verifier prompt separate from the extraction call — so the same failure mode isn't grading its own work — receives both structured objects plus source spans and returns schema-validated flags. Requiring a citation is necessary but *not sufficient*: a required string field catches a missing citation, not a fabricated one, and a model can invent a plausible quote that validates cleanly. So each cited span is checked against the real source before the flag is accepted:
+
+```python
+@model_validator(mode="after")
+def citations_must_exist(self, info):
+    corpus = info.context["source_text_by_id"]
+    for c in self.claims:                       # fuzzy, since OCR text drifts
+        if fuzz.partial_ratio(c.provenance.quote, corpus.get(c.provenance.source, "")) < 90:
+            raise ValueError(f"cited span not present in {c.provenance.source}")
+    return self
+```
+
+  A flag that can't be traced to real text fails validation and never reaches the UI. Malformed responses trigger a bounded retry (Instructor, or `model_validate` with a retry wrapper) rather than corrupting the report.
+- **RAG evaluation as a regression harness.** Because §3 retrieves document spans rather than concatenating them, retrieval quality becomes a correctness risk — a missed chunk looks identical to a missing field. I'd keep a labelled fixture set of case packets and score every pipeline change offline with RAGAS or DeepEval on **context recall** (did retrieval surface the span containing the answer) and **faithfulness** (is each extracted value grounded in retrieved context). That turns "the AI got worse after we changed the chunker" from a support ticket into a failing build — the difference between a demo and something defensible in a government review.
+- **On cross-attention specifically.** Inspecting attention weights is a model-internals interpretability technique — real, but available only when you control the weights, as with a fine-tuned encoder over prompt/document pairs. It isn't exposed by a hosted API, and attention maps are weak evidence of causal attribution even when you have them. The production equivalent is the grounded judge above: functionally "attend across both sources," done through prompting, and unlike an attention map it yields a citation a human can check.
+
+### 4.5 Surfacing discrepancies
+
+Flags render inline beside the affected field, showing each conflicting value with its source ("prompt" versus "contract.pdf p.3") and a one-line explanation. Blocking severities leave the field **empty** with a warning rather than silently picking a winner, and require an explicit decision recorded against the resolver's identity. Non-blocking flags pre-fill but stay visually marked. The principle throughout: the system never resolves a legal ambiguity on the user's behalf, and never hides that one existed.
 
 ---
 
-## 5. Resource-Constrained Pivot Strategy
-
-The architecture above is the target state. If I were dropped into this as immediate rescue work — tight timeline, no dedicated infra budget yet, small team — I wouldn't build all of it before shipping a fix. Each corner below is cut deliberately, and each is isolated behind an interface (`fileId`, the `CaseFieldsV1` schema, the file `status` enum) that doesn't change when the corner gets un-cut later:
-
-- **No Redis/BullMQ available yet:** run extraction synchronously inside the upload request handler behind a loading state, and cap accepted file size/page count to keep p95 latency tolerable (e.g., under ~15s). The frontend still polls a `fileId` for status — swapping in an actual queue later is a backend-only change.
-- **No OCR/vision infra stood up:** send the PDF/PNG directly to the LLM vendor's native multimodal document support instead of standing up Tesseract + a routing layer. Costs more per call, but removes an entire pipeline stage — the right trade when the priority is "fix Defect 2 this week," not "run this cheaply at scale."
-- **No object storage provisioned:** store file bytes as a `bytea`/BLOB column in whatever Postgres instance already exists (with a hard size cap), keyed by the same `fileId`. Migrating to S3/GCS later doesn't touch the frontend or the schema, only the storage adapter.
-- **No time for full autosave + cross-device sync:** ship the `sessionStorage`-backed Zustand store alone first — it directly fixes the reported symptom (Defect 1, state lost on back-navigation) — and land the server-side autosave endpoint as a fast-follow rather than blocking the fix on it.
-
-The underlying discipline is the same one that made stabilizing FoodLogiQ and Smile CDR's ingestion pipelines survivable under similar pressure: cut the corner that's cheapest to undo, never the interface. A rushed synchronous extraction call and a fully queued one look identical to the frontend; a rushed schema change never does.
-
----
-
-## 6. Provenance, Audit, and Government Proof-of-Value Considerations
-
-Deterministic provenance isn't a feature to add later for this design — it's already the backbone, because §4's `DiscrepancyFlag.source_citation` and per-field confidence score (§4.1) exist for reasons unrelated to compliance. For a government PoV, the same objects double as an audit record with a few additions:
-
-- **Append-only, not latest-value-only.** Persist every extraction and every judge-model verdict to an immutable `extraction_events` log keyed by `caseId`, not just the current structured result. "What did the system claim, from which source, and when" needs to be answerable months later, not just at request time.
-- **No opaque model decisions.** Because extraction and cross-reference validation are already schema-constrained (§3.1, §4.2) with retry-on-malformed-output, the raw prompt/response pairs are cheap to log and reviewable by a person without re-running the model.
-- **Data residency, flagged early, not discovered late.** A public multimodal LLM API is not a safe default for government case data containing PII. This needs an explicit decision — a VPC-scoped/GovCommercial-eligible model endpoint, or a self-hosted model for the extraction step — confirmed before it becomes a PoV blocker, not after the architecture is built around the wrong assumption.
-- **Retention tied to the existing lifecycle, not bolted on.** The status state machine in §3.2 already has a natural retention hook: `Ready` is the point extraction is trusted and retained; failed/abandoned uploads can be purged on a much shorter clock. Least-privilege access is scoped per `fileId`, matching the same reference object used everywhere else in the design.
-
-None of this requires new infrastructure beyond what §2–§4 already propose — it's the same objects, logged instead of discarded, and the same status model, given a retention policy instead of just a UI meaning.
+The companion appendix carries what didn't belong in a response of this length: how I'd stage this under a compressed timeline with no infrastructure budget, the provenance and Canadian data-residency posture the government Proof of Value implies, the data model, and full implementations of the store and validators. I'd be glad to walk through any of it.
