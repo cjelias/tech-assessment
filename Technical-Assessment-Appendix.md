@@ -213,18 +213,17 @@ class DiscrepancyFlag(BaseModel):
         return self
 ```
 
-**The statutory deadline rule.** Deterministic, no model involved, and the highest-consequence check in the system.
+**An illustrative statutory deadline rule.** Deterministic, no model involved — and the highest-consequence shape of check in the system. The numbers and clock-start logic below are a working example keyed off the brief's s.182 reference, not a legal holding.
 
 ```python
-RESTORATION_WINDOW_DAYS = 90   # IRPR s.182(1); no officer discretion to extend
+RESTORATION_WINDOW_DAYS = 90   # illustrative fixed window (brief cites IRPR s.182)
 
 def restoration_days_remaining(
     status_expiry: date, refusal_date: date | None, today: date
 ) -> int:
-    # The clock starts the day after the refusal decision when an extension was
-    # filed and refused; otherwise the day after the printed expiry date. Which
-    # of the two applies is precisely what a `document_only` flag surfaces when
-    # the client uploads a refusal letter they never mentioned in the prompt.
+    # Scenario: a refusal letter can shift the clock start away from the printed
+    # expiry. Which of the two applies is precisely what a `document_only` flag
+    # surfaces when the client uploads a document they never mentioned in the prompt.
     start = (refusal_date or status_expiry) + timedelta(days=1)
     return RESTORATION_WINDOW_DAYS - (today - start).days
 
@@ -238,8 +237,8 @@ def check_restoration(fields: CaseFieldsV1, today: date) -> DiscrepancyFlag | No
         )
     remaining = restoration_days_remaining(expiry, fields.refusal_date.value, today)
     if remaining <= 0:
-        # Out of time: restoration is unavailable and the form selection itself
-        # is wrong. A TRP under IRPA s.24 is the remaining path.
+        # Out of time under the illustrative rule: restoration is unavailable and
+        # the form selection itself is wrong — so block pre-fill rather than guess.
         return DiscrepancyFlag(
             field="case_type", severity="contradiction",
             claims=[...], blocks_prefill=True,
