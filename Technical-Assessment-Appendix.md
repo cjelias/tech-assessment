@@ -2,42 +2,17 @@
 
 **Companion to the Technical Assessment Response. Optional reading; the main response stands alone.**
 
-This covers material your email indicated would come up in the final conversation — pivoting under resource constraints, and the schemas behind the design — plus the compliance posture the government Proof of Value work implies. Numbered sections (§0–§4) are in the main response, lettered ones (§A–§F) are here. Every reference is a link.
+This covers material your email indicated would come up in the final conversation — pivoting under resource constraints, and the schemas behind the design — plus the compliance posture the government Proof of Value work implies. Numbered sections (§1–§4) are in the main response, lettered ones (§A–§F) are here. Every reference is a link.
 
 ---
 
-**Contents** — [Assumptions](#assumptions) · [A. Resource-Constrained Pivot Strategy](#a-resource-constrained-pivot-strategy) · [B. Provenance, Audit, and Compliance](#b-provenance-audit-and-canadian-compliance-posture) · [C. Data Model Sketch](#c-data-model-sketch) · [D. Store Implementation Notes](#d-store-implementation-notes) · [E. Validation Implementations](#e-validation-implementations) · [F. What Python 3.14 Changes](#f-what-python-314-actually-changes-here) · [Main response](Technical-Assessment-Response.md)
-
----
-
-## Assumptions
-
-[§0](Technical-Assessment-Response.md#0-assumptions) of the main response lists the assumptions that apply to both documents; those still hold here. These are additional, and the first one is the largest — [§A](#a-resource-constrained-pivot-strategy) is built on a scenario I invented, because your brief describes no constraints at all.
-
-| Area | Assumption | Note |
-|---|---|---|
-| A | "Tight timeline, no infrastructure budget, small team" is hypothetical | Your brief states none of these. It's written to answer the pivot-under-constraints question your email flagged for the final conversation. Give me the real constraints and this table changes |
-| A | ~15 s p95 is a tolerable synchronous wait behind a loading state | A chosen target, not a measured one |
-| A | Deterministic checks are ~15% of the validation work | An estimate from comparable pipelines; not measured here |
-| A | An LLM vendor with native multimodal document support is contractually available | Otherwise the OCR stage can't be skipped and that row of the table doesn't work |
-| B | Canadian jurisdiction, with IRCC the likely PoV counterparty | Inferred solely from the IRPR reference in your screenshot. A provincial or non-Canadian counterparty changes the whole residency analysis |
-| B | Protected B is the plausible classification ceiling | Stated nowhere; if it's higher, self-hosting stops being optional |
-| B | Cloud hosting rather than on-premises | On-prem removes the residency question and substitutes an operations burden |
-| B | The privilege discussion is engineering-informed, not legal advice | Needs counsel and law-society confirmation before it drives contract terms |
-| B | A form is eventually exported or filed from the pre-filled draft | The [§3](Technical-Assessment-Response.md#3-data-pipeline--error-handling) pipeline stops at pre-fill; the `relied_upon` event assumes a discrete downstream step. If there isn't one, that event becomes "user accepted the draft" and the argument is unchanged |
-| C | Multi-tenant, with user accounts (`org_id`, `created_by`) | Not stated; single-tenant would simplify the model |
-| C | Five tables is a sketch, not a complete model | Omits auth, the form registry, field mapping, and billing |
-| D | Next.js 16.1 App Router with server rendering | Hydration handling is unnecessary in a pure client-rendered SPA |
-| D | Autosave payloads stay under the 64 KB `keepalive` cap | A 5,000-word draft is roughly 30 KB, so it fits; the code guards the flag rather than assuming it |
-| E | Python 3.14, Pydantic v2, rapidfuzz; fuzzy threshold 90 | Dependency and tuning choices; [§F](#f-what-python-314-actually-changes-here) covers what 3.14 changes |
-| F | The extraction worker's dependency stack can be audited and pinned | Free-threading is only safe where you control every C extension |
-| E | `check_restoration` is illustrative | Claim construction is elided (`claims=[...]`) |
+**Contents** — [A. Resource-Constrained Pivot Strategy](#a-resource-constrained-pivot-strategy) · [B. Provenance, Audit, and Compliance](#b-provenance-audit-and-canadian-compliance-posture) · [C. Data Model Sketch](#c-data-model-sketch) · [D. Store Implementation Notes](#d-store-implementation-notes) · [E. Validation Implementations](#e-validation-implementations) · [F. What Python 3.14 Changes](#f-what-python-314-actually-changes-here) · [Main response](Technical-Assessment-Response.md)
 
 ---
 
 ## A. Resource-Constrained Pivot Strategy
 
-The architecture in the main response is the target state. Assume for this section the constraints named above — tight timeline, no infrastructure budget yet, small team — since dropped into that, I wouldn't build all of it before shipping a fix. Each corner below is cut deliberately, and each sits behind an interface (`fileId`, `CaseFieldsV1`, the file `status` enum) that doesn't change when the corner is later un-cut.
+The architecture in the main response is the target state. For this section, assume a tight timeline, no infrastructure budget yet, and a small team — constraints your brief never states, but that the pivot-under-constraints question in your email implies. Dropped into that, I wouldn't build all of it before shipping a fix. Each corner below is cut deliberately, and each sits behind an interface (`fileId`, `CaseFieldsV1`, the file `status` enum) that doesn't change when the corner is later un-cut.
 
 | Constraint | Cut | What it costs | Why the interface holds |
 |---|---|---|---|

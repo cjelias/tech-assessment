@@ -2,37 +2,13 @@
 
 **Lextar AI Document Processing Workflow — Case Description → Application Forms**
 Chris Elias · A companion appendix covers the pivot strategy, compliance posture, and schemas. This document stands alone.
-Numbered sections (§0–§4) are in this response, lettered ones (Appendix A–F) in the companion. Every reference is a link.
+Numbered sections (§1–§4) are in this response, lettered ones (Appendix A–F) in the companion. Every reference is a link.
 
 ---
 
-**Contents** — [0. Assumptions](#0-assumptions) · [1. Root Cause Analysis](#1-root-cause-analysis) ([1.1 state loss](#11-why-the-frontend-forgets-text-and-files-on-navigation) · [1.2 AI blindness](#12-why-the-ai-is-blind-to-the-uploaded-pdfs-and-pngs) · [1.3 first-hour triage](#13-confirming-this-in-the-first-hour)) · [2. Architecture & State](#2-architectural-solution--state-management) ([2.1 selection criterion](#21-the-selection-criterion-what-each-layer-must-survive) · [2.2 tools compared](#22-tools-considered-and-why) · [2.3 store shape](#23-store-placement-and-shape) · [2.4 binary uploads](#24-binary-uploads-across-page-transitions)) · [3. Data Pipeline & Error Handling](#3-data-pipeline--error-handling) · [4. Cross-Reference Validation](#4-cross-reference-validation--anomaly-detection) ([4.1 a gate](#41-a-gate-not-a-report) · [4.2 schema & provenance](#42-one-schema-with-provenance-on-every-field) · [4.3 severity](#43-severity-including-asymmetry) · [4.4 methods](#44-methods-by-category) · [4.5 string similarity](#45-choosing-a-string-similarity-metric) · [4.6 surfacing](#46-surfacing-discrepancies))
+**Contents** — [1. Root Cause Analysis](#1-root-cause-analysis) ([1.1 state loss](#11-why-the-frontend-forgets-text-and-files-on-navigation) · [1.2 AI blindness](#12-why-the-ai-is-blind-to-the-uploaded-pdfs-and-pngs) · [1.3 first-hour triage](#13-confirming-this-in-the-first-hour)) · [2. Architecture & State](#2-architectural-solution--state-management) ([2.1 selection criterion](#21-the-selection-criterion-what-each-layer-must-survive) · [2.2 tools compared](#22-tools-considered-and-why) · [2.3 store shape](#23-store-placement-and-shape) · [2.4 binary uploads](#24-binary-uploads-across-page-transitions)) · [3. Data Pipeline & Error Handling](#3-data-pipeline--error-handling) · [4. Cross-Reference Validation](#4-cross-reference-validation--anomaly-detection) ([4.1 a gate](#41-a-gate-not-a-report) · [4.2 schema & provenance](#42-one-schema-with-provenance-on-every-field) · [4.3 severity](#43-severity-including-asymmetry) · [4.4 methods](#44-methods-by-category) · [4.5 string similarity](#45-choosing-a-string-similarity-metric) · [4.6 surfacing](#46-surfacing-discrepancies))
 
 **Appendix** — [A pivot strategy](Technical-Assessment-Appendix.md#a-resource-constrained-pivot-strategy) · [B provenance & compliance](Technical-Assessment-Appendix.md#b-provenance-audit-and-canadian-compliance-posture) · [C data model](Technical-Assessment-Appendix.md#c-data-model-sketch) · [D store implementation](Technical-Assessment-Appendix.md#d-store-implementation-notes) · [E validation code](Technical-Assessment-Appendix.md#e-validation-implementations) · [F Python 3.14](Technical-Assessment-Appendix.md#f-what-python-314-actually-changes-here)
-
----
-
-## 0. Assumptions
-
-This is written without access to the repository, a running environment, logs, or the team. Everything below is inferred from the brief, the defect report, and the screenshot on page 2 — so I've listed what I assumed and what changes if I'm wrong, rather than letting those choices sit implicit in the design.
-
-| Area | Assumption | If it's wrong |
-|---|---|---|
-| Diagnosis | [§1](#1-root-cause-analysis) names *candidate* causes, not confirmed ones — no repo, environment, or logs | [§1.3](#13-confirming-this-in-the-first-hour) reorders which fix ships first, not the architecture |
-| Diagnosis | The page-2 screenshot is current production UI | The `accept`-filter finding drops; failure points 5–7 stand alone |
-| Stack | Next.js 16.1, React 19.2, App Router, React Compiler enabled | On Pages Router the store moves to `_app.tsx` and the `<Activity>` option in [§1.1](#11-why-the-frontend-forgets-text-and-files-on-navigation) disappears |
-| Stack | Postgres; Python 3.14 with Pydantic v2 (see [Appendix F](Technical-Assessment-Appendix.md#f-what-python-314-actually-changes-here)) | [Appendix C](Technical-Assessment-Appendix.md#c-data-model-sketch)'s DDL and the `Extracted[T]` syntax change; the model doesn't |
-| Stack | Object storage, job queue, and vector index available or fundable | [Appendix A](Technical-Assessment-Appendix.md#a-resource-constrained-pivot-strategy) is the plan for when they aren't |
-| Stack | Hosted LLM API with function calling, no access to weights | Cross-attention ([§4.4](#44-methods-by-category)) becomes viable with owned weights |
-| Stack | More than one backend replica, or serverless | Failure #8 disappears on a single long-lived process |
-| Domain | Canadian immigration practice; IRPR s.182 live for these users | `CaseFieldsV1` and the s.182 rule swap out; the provenance pattern doesn't |
-| Domain | Application Forms has an enumerable field schema to map into | [§3](#3-data-pipeline--error-handling)'s mapping needs a form registry before [§4](#4-cross-reference-validation--anomaly-detection) is useful |
-| Domain | Statutory rules in code get counsel sign-off and an effective date | A process requirement, not a code one — encoding a misread rule is worse than encoding none |
-| Domain | Case data is PII and may be privileged | [Appendix B](Technical-Assessment-Appendix.md#b-provenance-audit-and-canadian-compliance-posture)'s residency and privilege posture relaxes considerably |
-| Product | Upload-on-selection is acceptable; drafts exist before submit | Falls back to upload-on-submit; files can't pre-process |
-| Product | A human reviewer clears blocking flags | Blocking pre-fill becomes a queue nobody drains |
-| Product | Typed case text stays out of browser storage as PII | Drop `partialize` and the draft survives refresh too |
-| Numbers | 6,700 tokens per 5,000 words, 0.9 fuzzy threshold, 800 ms debounce, 15 s p95 | Starting points for tuning, not derived from your data |
 
 ---
 
