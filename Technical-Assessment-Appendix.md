@@ -49,7 +49,7 @@ The architecture in the main response is the target state. Assume for this secti
 
 That last row is the one I'd defend hardest. Deterministic checks are perhaps fifteen percent of the validation work and catch the errors with the worst consequences, because statutory deadlines are arithmetic. Shipping them alone is a defensible interim product; shipping the LLM judge alone would not be.
 
-The underlying discipline is what made the ingestion rescues at FoodLogiQ and Smile CDR survivable under similar pressure: **cut the corner that's cheapest to undo, never the interface.** A rushed synchronous extraction and a fully queued one look identical to the frontend. A rushed schema change never does.
+The underlying discipline is what made the ingestion rescues at FoodLogiQ and Alberta Utility Billing survivable under similar pressure: **cut the corner that's cheapest to undo, never the interface.** A rushed synchronous extraction and a fully queued one look identical to the frontend. A rushed schema change never does.
 
 ---
 
